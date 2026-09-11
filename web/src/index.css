@@ -1,0 +1,121 @@
+@import "tailwindcss";
+
+/* Light is the base set; the dark values below only redefine the same tokens,
+   so every utility (bg-card, text-ink2, border-line …) follows the theme with
+   no dark: variants anywhere in the components.
+
+   Class hues are tokens too, because a hue that reads well on white is not the
+   same hue that reads well on near-black. Both columns are validated for
+   colour-blind separation against their own surface. */
+/* `static` matters: Tailwind only emits theme variables that some utility
+   references, and the class hues are used from inline style="" via var(), not
+   from a class name — without this, seven of the eight silently vanish in the
+   light theme and every donut slice but one renders transparent. */
+@theme static {
+  --color-page: #f9f9f7;
+  --color-surface: #fcfcfb;
+  --color-card: #ffffff;
+  --color-stage: #eceae5;       /* neutral backdrop behind photographs */
+  --color-line: #e1e0d9;
+  --color-rule: #c3c2b7;
+  --color-hover: #f1f0ec;
+  --color-scrim: rgba(11, 11, 11, 0.62);   /* behind a modal */
+
+  --color-ink: #0b0b0b;
+  --color-ink2: #52514e;
+  --color-muted: #898781;
+  --color-brand: #2a78d6;       /* links, focus rings, checkboxes */
+
+  --color-ok: #0ca30c;          /* verdict marks and text */
+  --color-ok-fill: #0ca30c;
+  --color-ok-ink: #0b0b0b;      /* 5.9:1 on the fill */
+  --color-no: #d03b3b;
+  --color-no-fill: #d03b3b;
+  --color-no-ink: #ffffff;      /* 4.8:1 on the fill */
+  --color-warn: #ec835a;
+  --color-neutral: #c3c2b7;     /* "Other" slices, unfilled tracks */
+
+  --color-cls-1: #2a78d6; --color-cls-ink-1: #0b0b0b;
+  --color-cls-2: #eb6834; --color-cls-ink-2: #0b0b0b;
+  --color-cls-3: #1baf7a; --color-cls-ink-3: #0b0b0b;
+  --color-cls-4: #eda100; --color-cls-ink-4: #0b0b0b;
+  --color-cls-5: #e87ba4; --color-cls-ink-5: #0b0b0b;
+  --color-cls-6: #008300; --color-cls-ink-6: #ffffff;
+  --color-cls-7: #4a3aa7; --color-cls-ink-7: #ffffff;
+  --color-cls-8: #e34948; --color-cls-ink-8: #0b0b0b;
+}
+
+/* The dark steps. Declared twice on purpose: the media query covers "follow the
+   OS", the attribute covers an explicit choice, and the :not() guard lets a
+   stored "light" beat an OS set to dark. */
+
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-page: #131312;
+    --color-surface: #1a1a19;
+    --color-card: #1f1f1e;
+    --color-stage: #1e1e1d;
+    --color-line: #2c2c2a;
+    --color-rule: #3b3b38;
+    --color-hover: #272725;
+    --color-scrim: rgba(0, 0, 0, 0.74);
+
+    --color-ink: #ffffff;
+    --color-ink2: #c3c2b7;
+    --color-muted: #898781;
+    --color-brand: #3987e5;
+
+    --color-ok: #0ca30c;
+    --color-ok-fill: #0ca30c;
+    --color-ok-ink: #0b0b0b;
+    --color-no: #e66767;
+    --color-no-fill: #e66767;
+    --color-no-ink: #0b0b0b;    /* 6.1:1 on the lighter red */
+    --color-warn: #ec835a;
+    --color-neutral: #55554f;
+
+    --color-cls-1: #3987e5; --color-cls-2: #d95926;
+    --color-cls-3: #199e70; --color-cls-4: #c98500;
+    --color-cls-5: #d55181; --color-cls-6: #008300;
+    --color-cls-7: #9085e9; --color-cls-8: #e66767;
+    --color-cls-ink-7: #0b0b0b; /* the dark violet step takes dark ink */
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-page: #131312;
+  --color-surface: #1a1a19;
+  --color-card: #1f1f1e;
+  --color-stage: #1e1e1d;
+  --color-line: #2c2c2a;
+  --color-rule: #3b3b38;
+  --color-hover: #272725;
+  --color-scrim: rgba(0, 0, 0, 0.74);
+
+  --color-ink: #ffffff;
+  --color-ink2: #c3c2b7;
+  --color-muted: #898781;
+  --color-brand: #3987e5;
+
+  --color-ok: #0ca30c;
+  --color-ok-fill: #0ca30c;
+  --color-ok-ink: #0b0b0b;
+  --color-no: #e66767;
+  --color-no-fill: #e66767;
+  --color-no-ink: #0b0b0b;
+  --color-warn: #ec835a;
+  --color-neutral: #55554f;
+
+  --color-cls-1: #3987e5; --color-cls-2: #d95926;
+  --color-cls-3: #199e70; --color-cls-4: #c98500;
+  --color-cls-5: #d55181; --color-cls-6: #008300;
+  --color-cls-7: #9085e9; --color-cls-8: #e66767;
+  --color-cls-ink-7: #0b0b0b;
+}
+
+html, body, #root { height: 100%; }
+body { margin: 0; background: var(--color-page); color: var(--color-ink); }
+.num { font-variant-numeric: tabular-nums; }

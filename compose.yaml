@@ -1,0 +1,44 @@
+# Dataset review GUI — browser is internal-only; Caddy is the sole entrypoint.
+# Build: docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
+
+services:
+  browser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Must match the host `dvc` group GID or the read-only dataset mount is unreadable.
+        # Override at build time; default matches this NUC (getent group dvc → 1001).
+        DVC_GID: "1001"
+    # No ports: — publishing 8800 would let anyone on the VPN skip Caddy basic_auth.
+    # Appended to the Dockerfile ENTRYPOINT.
+    command: ["--user-header", "X-Remote-User"]
+    volumes:
+      - /srv/data/datasets:/data/datasets:ro
+      - /srv/data/review:/data/review
+    read_only: true
+    tmpfs:
+      # Thumbnail cache (--cache /var/cache/thumbs); HOME=/var/cache in the image.
+      - /var/cache:uid=1500,gid=1001,mode=0755
+      - /tmp:uid=1500,gid=1001,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    # Bind only the VPN address. Bare "80:80" listens on all interfaces (LAN,
+    # docker bridges, etc.), which widens exposure beyond the VPN path.
+    ports:
+      - "10.161.5.213:80:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [browser]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

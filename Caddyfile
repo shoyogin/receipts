@@ -1,0 +1,37 @@
+# Plain HTTP is fine on VPN-only access. For HTTPS with an internal CA later:
+#
+# dataset-browser.internal {
+#     tls /etc/caddy/certs/cert.pem /etc/caddy/certs/key.pem
+#     # …same handlers as below…
+# }
+#
+# Generate password hashes (bcrypt), one per user:
+#   docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
+# Paste each hash below in place of REPLACE_ME_<user>.
+
+:80 {
+    log {
+        output stdout
+    }
+
+    request_body {
+        max_size 2MB
+    }
+
+    basic_auth {
+        # One line per reviewer: <username> <bcrypt hash from the command above>.
+        alice         REPLACE_ME_alice
+        bob           REPLACE_ME_bob
+    }
+
+    reverse_proxy browser:8800 {
+        # Drop any client-supplied identity, then set it from basic_auth.
+        header_up -X-Remote-User
+        header_up X-Remote-User {http.auth.user.id}
+
+        # Dataset zips are streamed chunk by chunk as they are read off disk.
+        # Buffering them here would stall the download until the whole version
+        # had been built in Caddy's memory.
+        flush_interval -1
+    }
+}
