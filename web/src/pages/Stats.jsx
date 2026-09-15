@@ -100,7 +100,12 @@ export default function Stats() {
           <h2 className="text-sm font-semibold">Every class</h2>
           <p className="mt-0.5 mb-3 text-xs text-muted">
             Boxes per class, and how they fall across the splits. This is the full
-            list — the chart above folds the small classes into one slice.
+            list — the chart above folds the small classes into one slice.{' '}
+            {stats.class_source
+              ? <>Names come from <code className="text-ink2">{stats.class_source}</code>.</>
+              : <>No <code className="text-ink2">classes.txt</code> or{' '}
+                 <code className="text-ink2">data.yaml</code> in this version, so the
+                 classes are numbered as the label files have them.</>}
           </p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-lg border-collapse text-sm">

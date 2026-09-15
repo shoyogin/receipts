@@ -8,15 +8,18 @@ Usage:
 Expects:
     <root>/<version>/images/<split>/*.jpg
     <root>/<version>/labels/<split>/*.txt
-    <root>/<version>/data.yaml          (optional, for class names)
+    <root>/<version>/classes.txt        (optional, for class names)
+    <root>/<version>/data.yaml          (optional, same, used if there is no
+                                         classes.txt)
 
 Review flags are written to a SEPARATE directory (--review), never into the
 dataset. Each version/split gets an append-only JSONL log, so nothing is ever
 overwritten and you keep the full history of who changed what.
 
-A review verdict is "ok" or "no" (plus a comment saying why). Downloads can
-exclude every image marked "no", which is how a cleaned-up version of the
-dataset is produced — the source tree is never modified.
+A review verdict is "ok" or "no", and any image can carry a thread of comments
+from any number of reviewers. Downloads can exclude every image marked "no",
+which is how a cleaned-up version of the dataset is produced — the source tree
+is never modified.
 
 Dependencies: none (stdlib only). Pillow is used for thumbnails if present.
 This server never writes to the dataset root. It opens files read-only.
@@ -31,6 +34,7 @@ import os
 import re
 import sys
 import threading
+import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -55,12 +59,21 @@ CACHE_DIR = None
 _scan_lock = threading.Lock()
 _scan_cache = {}
 _flag_lock = threading.Lock()
-_flags = {}          # (version, split) -> {image: record}
+_flags = {}          # (version, split) -> {image: entry}
 
 # A verdict is a keep/reject decision. "fix" and "drop" are what older logs on
 # the NUC wrote; both mean "not ok" and fold into "no" when read back.
 STATUSES = ("ok", "no")
 LEGACY_STATUS = {"fix": "no", "drop": "no"}
+
+# Reserved comment id for the single inline note older logs wrote on the verdict.
+NOTE_ID = "note"
+COMMENT_MAX = 2000
+
+
+def now_iso():
+    # Milliseconds, so two comments typed in the same second still sort right.
+    return datetime.datetime.now().astimezone().isoformat(timespec="milliseconds")
 
 
 # ---------------------------------------------------------------- filesystem
@@ -100,19 +113,38 @@ def list_splits(version: str):
     return subs
 
 
-def read_classes(version: str):
-    """Tolerant data.yaml reader. Handles inline lists, block lists and index maps."""
-    for cand in ("data.yaml", "data.yml", "dataset.yaml"):
-        f = safe_under_root(Path(version) / cand)
-        if f.is_file():
-            break
-    else:
-        return []
-    try:
-        text = f.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
+def parse_classes_txt(text: str):
+    """One class per line. Accepts bare names and index-prefixed names.
 
+        car              0 car            0: car
+        person           1 person         1, person
+
+    Blank lines and # comments are skipped. The indices are only believed when
+    every line carries one — a half-indexed file is far more likely to be plain
+    names that happen to start with a digit, and reading those as indices would
+    scramble the whole list.
+    """
+    rows = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^(\d+)[\s:,]+(.+)$", line)
+        idx = int(m.group(1)) if m else None
+        # Two readings of "747 jet": index 747 named "jet", or a class actually
+        # called "747 jet". Keep both until the whole file says which it is.
+        rows.append((idx, m.group(2).strip().strip("'\"") if m else "",
+                     line.strip("'\"")))
+    if not rows:
+        return []
+    if all(i is not None for i, _, _ in rows):
+        indexed = {i: n for i, n, _ in rows}
+        return [indexed.get(i, str(i)) for i in range(max(indexed) + 1)]
+    return [raw for _, _, raw in rows]
+
+
+def parse_data_yaml(text: str):
+    """Tolerant data.yaml reader. Handles inline lists, block lists and index maps."""
     m = re.search(r"^names:\s*\[(.*?)\]", text, re.M | re.S)
     if m:
         return [s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()]
@@ -134,6 +166,36 @@ def read_classes(version: str):
             return [indexed.get(i, str(i)) for i in range(max(indexed) + 1)]
         return names
     return []
+
+
+# Where class names come from, best first. classes.txt wins over data.yaml —
+# it is what the labelling tools write and what people edit by hand, so when
+# the two disagree it is the one that matches the label files. A copy at the
+# dataset root covers every version that does not carry its own.
+CLASS_SOURCES = (
+    ("classes.txt", parse_classes_txt, True),
+    ("labels/classes.txt", parse_classes_txt, True),
+    ("data.yaml", parse_data_yaml, True),
+    ("data.yml", parse_data_yaml, True),
+    ("dataset.yaml", parse_data_yaml, True),
+    ("classes.txt", parse_classes_txt, False),   # shared, at the dataset root
+)
+
+
+def read_classes(version: str):
+    """(names, where they came from). Empty list and "" when nothing is found."""
+    for name, parse, in_version in CLASS_SOURCES:
+        rel = Path(version) / name if in_version else Path(name)
+        try:
+            f = safe_under_root(rel)
+            if not f.is_file():
+                continue
+            names = parse(f.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, PermissionError):
+            continue
+        if names:
+            return names, str(rel).replace("\\", "/")
+    return [], ""
 
 
 def parse_label(path: Path):
@@ -205,7 +267,7 @@ def scan(version: str, split: str):
 
 
 def stats_for(version: str):
-    classes = read_classes(version)
+    classes, class_source = read_classes(version)
     splits, total, unlabeled, empty, counts = {}, 0, 0, 0, {}
     split_counts = {}
     for sp in list_splits(version):
@@ -222,10 +284,14 @@ def stats_for(version: str):
                 counts[b[0]] = counts.get(b[0], 0) + 1
                 per[b[0]] = per.get(b[0], 0) + 1
         split_counts[sp] = per
+    # A label file can reference an index the name file never mentions. Pad
+    # rather than drop it, so a stray class still shows up and stays filterable.
     ncls = max([len(classes)] + [k + 1 for k in counts]) if (classes or counts) else 0
+    names = list(classes) + [str(i) for i in range(len(classes), ncls)]
     return {
         "version": version,
-        "classes": classes or [str(i) for i in range(ncls)],
+        "classes": names,
+        "class_source": class_source,
         "splits": splits,
         "total": total,
         "unlabeled": unlabeled,
@@ -268,8 +334,50 @@ def review_path(version: str, split: str) -> Path:
     return REVIEW / f"{safe}.jsonl"
 
 
+def blank_entry():
+    """What the log replays into: one verdict, plus a thread of comments."""
+    return {"status": "", "reviewer": "", "ts": "", "comments": {}}
+
+
+def replay(entry, rec):
+    """Fold one log line into an image's entry. Called in file order."""
+    if rec.get("kind") == "comment":
+        cid = rec.get("id")
+        if not cid:
+            return
+        if rec.get("deleted"):
+            entry["comments"].pop(cid, None)
+        else:
+            entry["comments"][cid] = {
+                "id": cid,
+                "text": rec.get("text", ""),
+                "reviewer": rec.get("reviewer", ""),
+                "ts": rec.get("ts", ""),
+            }
+        return
+
+    st = rec.get("status", "")
+    entry["status"] = LEGACY_STATUS.get(st, st)
+    entry["reviewer"] = rec.get("reviewer", "")
+    entry["ts"] = rec.get("ts", "")
+
+    # Logs written before threads existed carried the reason inline on the
+    # verdict: one note per image, the last one winning. Give it a reserved
+    # slot in the thread so re-saves of a note being typed collapse into the
+    # single comment they always were, instead of stacking up as drafts.
+    # Verdicts written since carry no "note" key at all and leave the thread be.
+    if "note" in rec:
+        note = rec.get("note") or ""
+        if note:
+            entry["comments"][NOTE_ID] = {"id": NOTE_ID, "text": note,
+                                          "reviewer": rec.get("reviewer", ""),
+                                          "ts": rec.get("ts", "")}
+        else:
+            entry["comments"].pop(NOTE_ID, None)
+
+
 def load_flags(version: str, split: str):
-    """Replay the append-only log; the last record for an image wins."""
+    """Replay the append-only log into {image: entry}."""
     key = (version, split)
     with _flag_lock:
         if key in _flags:
@@ -286,10 +394,9 @@ def load_flags(version: str, split: str):
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue          # tolerate a torn final line
-                    if rec.get("image"):
-                        st = rec.get("status", "")
-                        rec["status"] = LEGACY_STATUS.get(st, st)
-                        latest[rec["image"]] = rec
+                    img = rec.get("image")
+                    if img:
+                        replay(latest.setdefault(img, blank_entry()), rec)
         except OSError:
             pass
     with _flag_lock:
@@ -297,16 +404,31 @@ def load_flags(version: str, split: str):
     return latest
 
 
-def append_flag(version, split, image, status, note, reviewer):
-    if status not in STATUSES + ("",):
-        raise ValueError("bad status")
-    rec = {
-        "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-        "image": image,
-        "status": status,
-        "note": (note or "")[:1000],
-        "reviewer": (reviewer or "anon")[:64],
-    }
+def thread(entry):
+    """An image's comments, oldest first."""
+    return sorted(entry["comments"].values(), key=lambda c: (c["ts"], c["id"]))
+
+
+def flag_view(entry):
+    """The shape the API hands out. Never the internal entry: its comments are
+    a dict keyed by id, which is replay bookkeeping the client has no use for."""
+    return {"status": entry["status"], "reviewer": entry["reviewer"],
+            "ts": entry["ts"], "comments": thread(entry)}
+
+
+def flag_of(version, split, image):
+    return flag_view(load_flags(version, split).get(image) or blank_entry())
+
+
+def comment_digest(entry):
+    """Every comment on one image, flattened into a single CSV cell. Authors are
+    spelled out per comment: the row's own reviewer column is the person who
+    passed the verdict, which need not be the person who explained it."""
+    return " | ".join(f"{c['reviewer'] or 'anon'}: {c['text']}" for c in thread(entry))
+
+
+def append_record(version, split, rec):
+    """Append one line to the log and fold it into the cache."""
     REVIEW.mkdir(parents=True, exist_ok=True)
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     with _flag_lock:
@@ -315,12 +437,60 @@ def append_flag(version, split, image, status, note, reviewer):
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
-        _flags.setdefault((version, split), {})[image] = rec
+        # Only touch a split already in the cache. Seeding it here would leave
+        # a one-record dict standing in for a log full of earlier verdicts.
+        cached = _flags.get((version, split))
+        if cached is not None:
+            replay(cached.setdefault(rec["image"], blank_entry()), rec)
     return rec
 
 
+def append_flag(version, split, image, status, reviewer):
+    if status not in STATUSES + ("",):
+        raise ValueError("bad status")
+    return append_record(version, split, {
+        "kind": "status",
+        "ts": now_iso(),
+        "image": image,
+        "status": status,
+        "reviewer": (reviewer or "anon")[:64],
+    })
+
+
+def append_comment(version, split, image, text, reviewer):
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty comment")
+    return append_record(version, split, {
+        "kind": "comment",
+        "id": uuid.uuid4().hex[:12],
+        "ts": now_iso(),
+        "image": image,
+        "text": text[:COMMENT_MAX],
+        "reviewer": (reviewer or "anon")[:64],
+    })
+
+
+def delete_comment(version, split, image, cid, reviewer):
+    """Tombstone one comment. Only its author may, and the log keeps the pair."""
+    entry = load_flags(version, split).get(image)
+    existing = entry["comments"].get(cid) if entry else None
+    if not existing:
+        raise FileNotFoundError("unknown comment")
+    if (existing["reviewer"] or "anon") != (reviewer or "anon"):
+        raise PermissionError("not your comment")
+    return append_record(version, split, {
+        "kind": "comment",
+        "id": cid,
+        "ts": now_iso(),
+        "image": image,
+        "deleted": True,
+        "reviewer": (reviewer or "anon")[:64],
+    })
+
+
 def rejected(version: str):
-    """{split: {image: record}} for every image a reviewer marked "no"."""
+    """{split: {image: entry}} for every image a reviewer marked "no"."""
     out = {}
     for sp in list_splits(version):
         bad = {img: r for img, r in load_flags(version, sp).items()
@@ -336,14 +506,16 @@ def csv_cell(v):
 
 
 def review_csv(version):
-    rows = ["version,split,image,status,reviewer,timestamp,comment"]
+    rows = ["version,split,image,status,reviewer,timestamp,comments"]
     for sp in list_splits(version):
         for img, r in sorted(load_flags(version, sp).items()):
-            if not r.get("status"):
+            # A comment with no verdict still belongs in the export: somebody
+            # wrote down something about that image.
+            if not r.get("status") and not r["comments"]:
                 continue
             rows.append(",".join(csv_cell(x) for x in (
                 version, sp, img, r.get("status", ""),
-                r.get("reviewer", ""), r.get("ts", ""), r.get("note", ""))))
+                r.get("reviewer", ""), r.get("ts", ""), comment_digest(r))))
     return "\n".join(rows) + "\n"
 
 
@@ -457,12 +629,12 @@ def exclusion_manifest(version, rej):
         f"# built {datetime.datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"# {n} image{'' if n == 1 else 's'} excluded after review",
         "",
-        "split,image,reviewer,timestamp,comment",
+        "split,image,reviewer,timestamp,comments",
     ]
     for sp in sorted(rej):
         for img, r in sorted(rej[sp].items()):
             out.append(",".join(csv_cell(x) for x in (
-                sp, img, r.get("reviewer", ""), r.get("ts", ""), r.get("note", ""))))
+                sp, img, r.get("reviewer", ""), r.get("ts", ""), comment_digest(r))))
     return "\n".join(out) + "\n"
 
 
@@ -577,7 +749,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/items":
                 sp = q.get("split", ".")
                 flags = load_flags(q["v"], sp)
-                items = [dict(i, flag=flags.get(i["name"]))
+                items = [dict(i, flag=flag_view(flags[i["name"]])
+                              if i["name"] in flags else None)
                          for i in scan(q["v"], sp)]
                 cls = q.get("cls", "")
                 mode = q.get("mode", "all")
@@ -587,10 +760,12 @@ class Handler(BaseHTTPRequestHandler):
                     items = [i for i in items if i["labeled"] and not i["boxes"]]
                 elif mode == "unreviewed":
                     items = [i for i in items
-                             if not (i["flag"] and i["flag"].get("status"))]
+                             if not (i["flag"] and i["flag"]["status"])]
+                elif mode == "commented":
+                    items = [i for i in items if i["flag"] and i["flag"]["comments"]]
                 elif mode in STATUSES:
                     items = [i for i in items
-                             if i["flag"] and i["flag"].get("status") == mode]
+                             if i["flag"] and i["flag"]["status"] == mode]
                 if cls.strip():
                     # cls accepts one index or a comma list: "3" or "0,2,5".
                     # clsmode=any (default) keeps images holding at least one of
@@ -610,6 +785,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/review/meta":
                 return self._json({
                     "statuses": list(STATUSES),
+                    "comment_max": COMMENT_MAX,
                     "writable": os.access(REVIEW, os.W_OK) if REVIEW.exists() else False,
                     "user": (self.headers.get(USER_HEADER) or "") if USER_HEADER else None,
                 })
@@ -626,7 +802,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({
                     "version": q["v"],
                     "total": sum(len(v) for v in rej.values()),
-                    "images": [dict(r, split=sp, image=img)
+                    "images": [dict(flag_view(r), split=sp, image=img)
                                for sp in sorted(rej)
                                for img, r in sorted(rej[sp].items())],
                 })
@@ -683,33 +859,50 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- POST ------------------------------------------------------------
 
+    def _target(self, body):
+        """Check {v, split, image} against the dataset and name the author."""
+        for k in ("v", "split", "image"):
+            if not isinstance(body.get(k), str) or not body[k]:
+                raise ValueError(f"missing {k}")
+        sub = (Path(body["v"]) / "images" / body["split"] / body["image"]
+               if body["split"] != "." else
+               Path(body["v"]) / "images" / body["image"])
+        if not safe_under_root(sub).is_file():
+            raise FileNotFoundError("unknown image")
+        # An authenticated proxy wins over the self-declared name.
+        who = body.get("reviewer", "")
+        if USER_HEADER:
+            who = self.headers.get(USER_HEADER) or "unauthenticated"
+        return body["v"], body["split"], body["image"], who
+
     def do_POST(self):
         u = urlparse(self.path)
         try:
-            if u.path != "/api/flag":
+            if u.path not in ("/api/flag", "/api/comment", "/api/comment/delete"):
                 return self._send(404, b"not found", "text/plain")
             n = int(self.headers.get("Content-Length", 0))
             if n > 64_000:
                 return self._json({"error": "payload too large"}, 413)
             body = json.loads(self.rfile.read(n) or b"{}")
-            for k in ("v", "split", "image"):
-                if not isinstance(body.get(k), str) or not body[k]:
-                    return self._json({"error": f"missing {k}"}, 400)
-            # confirm the image really exists in this dataset before logging it
-            sub = (Path(body["v"]) / "images" / body["split"] / body["image"]
-                   if body["split"] != "." else
-                   Path(body["v"]) / "images" / body["image"])
-            if not safe_under_root(sub).is_file():
-                return self._json({"error": "unknown image"}, 404)
-            # An authenticated proxy wins over the self-declared name.
-            who = body.get("reviewer", "")
-            if USER_HEADER:
-                who = self.headers.get(USER_HEADER) or "unauthenticated"
-            rec = append_flag(body["v"], body["split"], body["image"],
-                              body.get("status", ""), body.get("note", ""), who)
-            return self._json({"ok": True, "flag": rec})
-        except PermissionError:
-            return self._send(403, b"forbidden", "text/plain")
+            v, sp, img, who = self._target(body)
+
+            if u.path == "/api/flag":
+                append_flag(v, sp, img, body.get("status", ""), who)
+            elif u.path == "/api/comment":
+                append_comment(v, sp, img, body.get("text", ""), who)
+            else:
+                cid = body.get("id")
+                if not isinstance(cid, str) or not cid:
+                    return self._json({"error": "missing id"}, 400)
+                delete_comment(v, sp, img, cid, who)
+
+            # The whole thread comes back, so a client that missed somebody
+            # else's comment catches up on its next write instead of drifting.
+            return self._json({"ok": True, "flag": flag_of(v, sp, img)})
+        except PermissionError as e:
+            return self._json({"error": str(e) or "forbidden"}, 403)
+        except FileNotFoundError as e:
+            return self._json({"error": str(e) or "not found"}, 404)
         except ValueError as e:
             return self._json({"error": str(e)}, 400)
         except OSError as e:

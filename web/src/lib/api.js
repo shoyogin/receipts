@@ -19,8 +19,11 @@ export const getRejects = (v) => json('/api/review/rejects?' + qs({ v }))
 export const getTree = (path) => json('/api/tree?' + qs({ path: path || '' }))
 export const refresh = () => json('/api/refresh')
 
-export async function saveFlag(body) {
-  const r = await fetch('/api/flag', {
+/** Every write answers with the image's whole flag — verdict plus the full
+ *  comment thread — so a reviewer who missed someone else's comment catches up
+ *  on their next click instead of drifting out of date. */
+async function write(url, body) {
+  const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -29,6 +32,10 @@ export async function saveFlag(body) {
   if (!r.ok) throw new Error(d.error || 'could not save')
   return d.flag
 }
+
+export const saveFlag = (body) => write('/api/flag', body)
+export const addComment = (body) => write('/api/comment', body)
+export const deleteComment = (body) => write('/api/comment/delete', body)
 
 export const imgUrl = (v, split, name, thumb) =>
   '/img?' + qs(thumb ? { t: 1, v, split, n: name } : { v, split, n: name })
