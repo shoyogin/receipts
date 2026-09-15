@@ -5,7 +5,7 @@ Review UI for YOLO dataset versions on a mounted disk. Three pages:
 | Page | What it is for |
 |---|---|
 | **Files** | Browse the dataset folder tree and download it — any folder as a zip, any file on its own, or a whole version with the rejected images left out |
-| **Review** | Look at every image with its boxes and class names, filter by class, and mark each one OK or not OK |
+| **Review** | Look at every image with its boxes and class names, filter by class, mark each one OK or not OK, and talk it over in a comment thread |
 | **Stats** | Image / class / box counts and pie charts of how the classes are distributed |
 
 React + Vite + Tailwind front end in [`web/`](web/), served by a stdlib-only
@@ -33,21 +33,48 @@ python3 dataset_browser.py /path/to/datasets --review /path/to/review --port 880
 cd web && npm run dev            # http://localhost:5173
 ```
 
+## Class names
+
+They come from a `classes.txt` in the version folder, or in its `labels/`
+folder, or one shared at the dataset root — first one found wins, and
+`data.yaml` is only read when there is no `classes.txt` anywhere. One class per
+line, with or without the index:
+
+```
+car          0 car        0: car
+person       1 person     1, person
+```
+
+Blank lines and `#` comments are skipped. The indices are only believed when
+every line carries one, so a file of plain names that happen to start with a
+digit is read as names. A class index a label file uses but the name file never
+mentions still shows up, numbered. Stats says which file the names came from.
+
 ## Reviewing
 
-A verdict is **OK** or **not OK**; a rejection takes a comment saying why.
-Keyboard: `1` OK, `2` not OK, `←` `→` move, `esc` close. An OK jumps to the
-next image; a rejection stays put so you can type the comment.
+A verdict is **OK** or **not OK**. Keyboard: `1` OK, `2` not OK, `←` `→` move,
+`esc` close. An OK jumps to the next image; a rejection stays put with the
+comment box focused.
 
-Verdicts go to an append-only JSONL log per version/split under `--review`,
-never into the dataset. The last record for an image wins, and the whole
-history of who changed what is kept.
+**Comments** are a thread, not a field. Any image takes any number of them from
+any number of reviewers, whether or not it has a verdict — so a question from
+one person and the answer from the next both survive, and marking an image OK or
+not OK later does not disturb what was written. `⌘↵` / `ctrl↵` sends; plain
+`↵` is a newline. You can delete your own comments and nobody else's; behind
+`--user-header` that is enforced against the proxy's identity, and without it
+against the self-declared name, where it is a courtesy rather than a control.
+The card shows a bubble and a count, and *Show → Has comments* filters to them.
+
+Verdicts and comments go to one append-only JSONL log per version/split under
+`--review`, never into the dataset. A verdict is the last one written; a comment
+lives until its author tombstones it. Nothing is ever rewritten, so the whole
+history of who said what is kept.
 
 **Downloading a cleaned version**: *Download reviewed dataset* (on Review, or on
 the version's folder in Files) streams the version as a zip with every image
 marked not OK — and its label file — left out, plus an `EXCLUDED.csv` listing
-what was dropped, by whom, and why. Nothing is written to the dataset: the new
-version exists only in the zip you downloaded.
+what was dropped, by whom, and every comment left on it. Nothing is written to
+the dataset: the new version exists only in the zip you downloaded.
 
 ## Deployment (NUC, behind Caddy)
 
@@ -117,14 +144,19 @@ Everything the UI does is a plain HTTP call, so scripts can use it too.
 | `GET /api/review/rejects?v=` | every image marked not OK, with comments |
 | `GET /api/review/export?v=` | review log as CSV |
 | `GET /api/refresh` | drop the scan and flag caches |
-| `POST /api/flag` | `{v, split, image, status, note, reviewer}` |
+| `POST /api/flag` | `{v, split, image, status, reviewer}` |
+| `POST /api/comment` | `{v, split, image, text, reviewer}` |
+| `POST /api/comment/delete` | `{v, split, image, id, reviewer}` — author only |
 | `GET /img?v=&split=&n=&t=1` | full image, or a cached thumbnail |
 | `GET /file?path=` | one file |
 | `GET /download?path=&exclude=1` | streamed zip; `exclude=1` drops rejected images |
 
-`mode` is `all｜unreviewed｜ok｜no｜unlabeled｜empty`. `cls` takes one class index
-or a comma list (`0,2,5`); `clsmode=any` (default) keeps images holding at least
-one of them, `clsmode=all` only those holding every one.
+Each `POST` answers with the image's whole flag — verdict plus the full thread
+— so a client that missed someone else's comment catches up on its next write.
+
+`mode` is `all｜unreviewed｜ok｜no｜commented｜unlabeled｜empty`. `cls` takes one
+class index or a comma list (`0,2,5`); `clsmode=any` (default) keeps images
+holding at least one of them, `clsmode=all` only those holding every one.
 
 Zips are streamed with chunked transfer encoding as the files are read, so a
 multi-gigabyte version starts downloading immediately and is never staged in
@@ -135,3 +167,8 @@ memory or on disk.
 Logs written by the previous UI used `ok｜fix｜drop`. Both `fix` and `drop` read
 back as `no`, so existing review work on the NUC carries over untouched — the
 original lines stay exactly as they were written.
+
+Those logs also carried the rejection reason inline on the verdict, one `note`
+per image with the last one winning. Each becomes the first comment in that
+image's thread, in a single reserved slot — so an image re-saved three times
+while somebody typed shows the one finished comment, not three drafts of it.

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BoxOverlay from '../components/BoxOverlay'
-import { folderZipUrl, getItems, getSummary, imgUrl, reviewCsvUrl, saveFlag } from '../lib/api'
+import {
+  addComment, deleteComment, folderZipUrl, getItems, getSummary, imgUrl,
+  reviewCsvUrl, saveFlag,
+} from '../lib/api'
 import { classColor } from '../lib/colors'
 import { bytes, nf, splitLabel, when } from '../lib/format'
 import { useData } from '../lib/store'
@@ -10,6 +13,7 @@ const SHOW = [
   ['unreviewed', 'Not reviewed yet'],
   ['ok', 'Marked OK'],
   ['no', 'Marked not OK'],
+  ['commented', 'Has comments'],
   ['unlabeled', 'Missing label file'],
   ['empty', 'Label file, no boxes'],
 ]
@@ -247,8 +251,19 @@ function StatusPill({ status }) {
   )
 }
 
+/** Small speech bubble. Drawn rather than set in type: the caption line is
+ *  already carrying a filename and a count, and a glyph reads faster there. */
+const Bubble = ({ className = '' }) => (
+  <svg viewBox="0 0 12 12" aria-hidden="true" fill="none" stroke="currentColor"
+       strokeWidth="1.1" strokeLinejoin="round"
+       className={`size-3 shrink-0 ${className}`}>
+    <path d="M1.8 2.2h8.4v5.4H5.4L3 9.8V7.6H1.8z" />
+  </svg>
+)
+
 function Card({ item, classes, version, split, onOpen }) {
   const status = item.flag?.status
+  const notes = item.flag?.comments?.length || 0
   return (
     <figure
       onClick={onOpen}
@@ -268,6 +283,12 @@ function Card({ item, classes, version, split, onOpen }) {
         status === 'ok' ? 'shadow-[inset_3px_0_0_var(--color-ok)]'
         : status === 'no' ? 'shadow-[inset_3px_0_0_var(--color-no)]' : ''}`}>
         <span className="truncate text-ink2">{item.name}</span>
+        {notes > 0 && (
+          <span className="num flex shrink-0 items-center gap-1 text-muted"
+                title={`${notes} comment${notes === 1 ? '' : 's'}`}>
+            <Bubble />{notes}
+          </span>
+        )}
         {item.labeled
           ? <span className="num shrink-0 text-muted">{item.boxes.length} box{item.boxes.length === 1 ? '' : 'es'}</span>
           : <span className="shrink-0 font-medium text-no">no label</span>}
@@ -279,13 +300,11 @@ function Card({ item, classes, version, split, onOpen }) {
 function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
                   onIndex, onClose, onFlag }) {
   const item = items[index]
-  const [note, setNote] = useState('')
   const [saved, setSaved] = useState('')
   const [error, setError] = useState('')
-  const noteRef = useRef(null)
+  const composeRef = useRef(null)
 
   useEffect(() => {
-    setNote(item.flag?.note || '')
     setError('')
     setSaved(item.flag?.status
       ? `${item.flag.reviewer || 'anon'} · ${when(item.flag.ts)}` : '')
@@ -293,22 +312,21 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
 
   const status = item.flag?.status
 
-  const commit = useCallback(async (verdict, text) => {
+  const commit = useCallback(async (verdict) => {
     setError('')
     try {
       const flag = await saveFlag({
-        v: version, split, image: item.name, status: verdict,
-        note: verdict === 'no' ? (text ?? note) : '', reviewer: who,
+        v: version, split, image: item.name, status: verdict, reviewer: who.trim(),
       })
       onFlag(item.name, flag)
       setSaved(`${flag.reviewer || 'anon'} · ${when(flag.ts)}`)
-      // Keep moving on an OK; a rejection needs its comment typed first.
+      // Keep moving on an OK; a rejection wants its reason typed first.
       if (verdict === 'ok' && index < items.length - 1) onIndex(index + 1)
-      else if (verdict === 'no') noteRef.current?.focus()
+      else if (verdict === 'no') composeRef.current?.focus()
     } catch (e) {
       setError(e.message)
     }
-  }, [version, split, item, note, who, index, items.length, onFlag, onIndex])
+  }, [version, split, item, who, index, items.length, onFlag, onIndex])
 
   useEffect(() => {
     const onKey = (e) => {
@@ -402,22 +420,6 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
               </button>
             </div>
 
-            {status === 'no' && (
-              <div className="mt-3">
-                <label htmlFor="note" className="text-xs text-ink2">What is wrong with it?</label>
-                <textarea
-                  id="note" ref={noteRef} value={note}
-                  onChange={(e) => setNote(e.target.value)}
-                  onBlur={() => commit('no', note)}
-                  placeholder="box is off, wrong class, blurred…"
-                  className="mt-1 min-h-[62px] w-full resize-y rounded-md border border-rule bg-card p-2 text-sm"
-                />
-                <p className="mt-1 text-[11px] text-muted">
-                  Excluded from the reviewed download. The comment travels with it in EXCLUDED.csv.
-                </p>
-              </div>
-            )}
-
             <p className={`mt-2 min-h-4 text-[11px] ${error ? 'text-no' : 'text-muted'}`}>
               {error || saved}
             </p>
@@ -433,6 +435,11 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
                 />
               </label>
             )}
+            <Thread
+              key={item.name} item={item} version={version} split={split}
+              who={who} boxRef={composeRef} onFlag={onFlag}
+            />
+
           </div>
 
           <div className="mt-4 flex items-center gap-2 text-[11px] text-muted">
@@ -444,6 +451,104 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+
+/** Every comment left on one image, oldest first, plus the box to add another.
+ *  Comments are independent of the verdict — an image can collect a question
+ *  from one reviewer and an answer from the next without anyone judging it. */
+function Thread({ item, version, split, who, boxRef, onFlag }) {
+  const comments = item.flag?.comments ?? []
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const me = who.trim() || 'anon'
+
+  const send = async () => {
+    const body = text.trim()
+    if (!body || busy) return
+    setBusy(true)
+    setError('')
+    try {
+      onFlag(item.name, await addComment({
+        v: version, split, image: item.name, text: body, reviewer: who.trim(),
+      }))
+      setText('')
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (id) => {
+    setError('')
+    try {
+      onFlag(item.name, await deleteComment({
+        v: version, split, image: item.name, id, reviewer: who.trim(),
+      }))
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  return (
+    <div className="mt-4 border-t border-line pt-3">
+      <h3 className="mb-2 flex items-center gap-1.5 text-xs font-medium text-ink2">
+        <Bubble />
+        Comments {comments.length > 0 && <span className="num">({comments.length})</span>}
+      </h3>
+
+      {comments.length === 0 ? (
+        <p className="text-[11px] text-muted">None yet.</p>
+      ) : (
+        <ul className="space-y-2">
+          {comments.map((c) => (
+            <li key={c.id} className="rounded-md border border-line bg-page px-2.5 py-1.5">
+              <div className="flex items-baseline gap-2 text-[11px] text-muted">
+                <b className="font-semibold text-ink2">{c.reviewer || 'anon'}</b>
+                <span className="num">{when(c.ts)}</span>
+                <span className="flex-1" />
+                {(c.reviewer || 'anon') === me && (
+                  <button
+                    onClick={() => remove(c.id)} title="Delete this comment"
+                    className="rounded px-1 leading-none hover:bg-hover hover:text-no"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+              <p className="mt-0.5 whitespace-pre-wrap break-words text-sm">{c.text}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <textarea
+        ref={boxRef} value={text} onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          // Enter alone has to stay a newline: these run to several lines.
+          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); send() }
+        }}
+        placeholder="box is off, wrong class, blurred…"
+        className="mt-2 min-h-[58px] w-full resize-y rounded-md border border-rule bg-card p-2 text-sm"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={send} disabled={busy || !text.trim()}
+          className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs hover:bg-hover disabled:opacity-45"
+        >
+          {busy ? 'Saving…' : 'Add comment'}
+        </button>
+        <span className="text-[11px] text-muted">⌘↵ / ctrl↵</span>
+      </div>
+
+      {error && <p className="mt-1 text-[11px] text-no">{error}</p>}
+      <p className="mt-2 text-[11px] text-muted">
+        Every comment on an image marked not OK travels with it into EXCLUDED.csv.
+      </p>
     </div>
   )
 }
