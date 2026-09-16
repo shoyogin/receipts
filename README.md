@@ -1,21 +1,17 @@
 # Dataset browser
 
-Review UI for YOLO dataset versions on a mounted disk. Three pages:
+Review UI for YOLO dataset versions on a mounted disk.
 
 | Page | What it is for |
 |---|---|
-| **Files** | Browse the dataset folder tree and download it — any folder as a zip, any file on its own, or a whole version with the rejected images left out |
-| **Review** | Look at every image with its boxes and class names, filter by class, mark each one OK or not OK, and talk it over in a comment thread |
-| **Stats** | Image / class / box counts and pie charts of how the classes are distributed |
+| **Files** | Browse the folder tree and download it — a folder as a zip, a single file, or a whole version with the rejected images left out |
+| **Review** | Every image with its boxes and class names: filter, mark OK or not OK, comment |
+| **Stats** | Image / class / box counts and how the classes are distributed |
 
-React + Vite + Tailwind front end in [`web/`](web/), served by a stdlib-only
-Python server ([`dataset_browser.py`](dataset_browser.py)) that also exposes the API.
+React + Vite + Tailwind in [`web/`](web/), served by a stdlib-only Python server
+([`dataset_browser.py`](dataset_browser.py)) that also exposes the API.
 
-## Running it locally
-
-The server needs a dataset root laid out as
-`<root>/<version>/images/<split>/*.jpg` with matching `labels/<split>/*.txt`
-(a flat `images/*.jpg` works too — that becomes the split `.`).
+## Running it
 
 ```bash
 cd web && npm install && npm run build && cd ..     # once
@@ -25,19 +21,27 @@ python3 dataset_browser.py /path/to/datasets \
 
 Open http://localhost:8800/.
 
-**Working on the UI**: run Vite instead of rebuilding each time. It proxies
-`/api`, `/img`, `/download` and `/file` to the Python server, so keep both up.
+Working on the UI? Run Vite instead of rebuilding each time — it proxies to the
+Python server, so keep both up:
 
 ```bash
 python3 dataset_browser.py /path/to/datasets --review /path/to/review --port 8800
 cd web && npm run dev            # http://localhost:5173
 ```
 
-## Class names
+## Dataset layout
 
-They come from a `classes.txt` in the version folder, or in its `labels/`
-folder, or one shared at the dataset root — first one found wins, and
-`data.yaml` is only read when there is no `classes.txt` anywhere. One class per
+```
+<root>/<version>/images/<split>/*.jpg
+<root>/<version>/labels/<split>/*.txt
+<root>/<version>/classes.txt            # optional
+```
+
+A flat `images/*.jpg` with no split folders works too — it becomes the split `.`.
+
+**Class names** come from `classes.txt` in the version folder, or in its
+`labels/` folder, or one shared at the dataset root — first found wins.
+`data.yaml` is read only when there is no `classes.txt` anywhere. One class per
 line, with or without the index:
 
 ```
@@ -45,10 +49,27 @@ car          0 car        0: car
 person       1 person     1, person
 ```
 
-Blank lines and `#` comments are skipped. The indices are only believed when
-every line carries one, so a file of plain names that happen to start with a
-digit is read as names. A class index a label file uses but the name file never
-mentions still shows up, numbered. Stats says which file the names came from.
+Blank lines and `#` comments are skipped. Indices are only believed when every
+line carries one, so plain names that start with a digit stay intact. Stats says
+which file the names came from.
+
+## Versioning
+
+Version folders are named by hand, and the prefix says how finished the dataset
+is:
+
+- **`tX.Y.Z`** — in progress (*test*)
+- **`vX.Y.Z`** — finished (*version*)
+
+The numbers move the same way under both prefixes:
+
+| Bump | When |
+|---|---|
+| `t0.0.0` → `t1.0.0` | a dataset completely different from the ones before |
+| `t0.0.0` → `t0.1.0` | images or classes added |
+| `t0.0.0` → `t0.0.1` | corrections — missing labels, images to remove, resizes |
+
+Versions are listed alphabetically, so every `t` sorts before every `v`.
 
 ## Reviewing
 
@@ -56,78 +77,50 @@ A verdict is **OK** or **not OK**. Keyboard: `1` OK, `2` not OK, `←` `→` mov
 `esc` close. An OK jumps to the next image; a rejection stays put with the
 comment box focused.
 
-**Comments** are a thread, not a field. Any image takes any number of them from
-any number of reviewers, whether or not it has a verdict — so a question from
-one person and the answer from the next both survive, and marking an image OK or
-not OK later does not disturb what was written. `⌘↵` / `ctrl↵` sends; plain
-`↵` is a newline. You can delete your own comments and nobody else's; behind
-`--user-header` that is enforced against the proxy's identity, and without it
-against the self-declared name, where it is a courtesy rather than a control.
+**Comments** are a thread. Any image takes any number of them from any number of
+reviewers, with or without a verdict, and a later verdict does not disturb them.
+`⌘↵` / `ctrl↵` sends. **edit** rewords one of your own and **×** removes it; the
+comment keeps its original author and place in the thread and is marked *edited*.
 The card shows a bubble and a count, and *Show → Has comments* filters to them.
 
-Verdicts and comments go to one append-only JSONL log per version/split under
-`--review`, never into the dataset. A verdict is the last one written; a comment
-lives until its author tombstones it. Nothing is ever rewritten, so the whole
-history of who said what is kept.
+Verdicts and comments go to an append-only JSONL log per version/split under
+`--review`, never into the dataset. Nothing is ever rewritten, so the history of
+who said what is kept.
 
-**Downloading a cleaned version**: *Download reviewed dataset* (on Review, or on
-the version's folder in Files) streams the version as a zip with every image
-marked not OK — and its label file — left out, plus an `EXCLUDED.csv` listing
-what was dropped, by whom, and every comment left on it. Nothing is written to
-the dataset: the new version exists only in the zip you downloaded.
+**Downloading a cleaned version**: *Download reviewed dataset* streams the
+version as a zip with every image marked not OK — and its label file — left out,
+plus an `EXCLUDED.csv` listing what was dropped, by whom, and every comment on
+it. The dataset itself is untouched; the new version exists only in the zip.
 
 ## Deployment (NUC, behind Caddy)
 
-Unchanged from before: `compose.yaml` runs the app with no published ports and
-Caddy as the sole entrypoint on the VPN address, doing `basic_auth` and setting
-`X-Remote-User`. With `--user-header X-Remote-User` the reviewer name comes from
-the proxy and any client-sent name is ignored.
+`compose.yaml` runs the app with no published ports; Caddy is the sole entrypoint
+on the VPN address, doing `basic_auth` and setting `X-Remote-User`. With
+`--user-header X-Remote-User` the reviewer name comes from the proxy and any
+client-sent name is ignored.
 
 ```bash
 docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
 docker compose up -d
 ```
 
-The Dockerfile builds the React app in a `node:22-alpine` stage and copies only
-`dist/` into the Python image, so node never ships to production.
-
 Mounts: `/srv/data/datasets` → `/data/datasets` **ro**, `/srv/data/review` →
-`/data/review` **rw**.
+`/data/review` **rw**. Passwords are bcrypt hashes in the Caddyfile, one line per
+reviewer:
 
-## Light and dark
+```bash
+docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
+```
 
-The theme button in the header flips between them; **double-click it to hand
-control back to the operating system**, which is where it starts (a dot on the
-button means it is following the OS). The choice is stored per browser, and a
-small script in `index.html` applies it before the first paint so a stored dark
-choice never flashes white.
+> Never add `header_up -X-Remote-User` to the `reverse_proxy` block. Caddy
+> applies header ops add, then set, then delete, so the deletion runs *after*
+> the line that sets the identity and strips it again — every verdict and
+> comment then lands under `unauthenticated`. The line that sets it is already a
+> replace, so there is nothing to guard against.
 
-Both themes are one set of tokens in [`web/src/index.css`](web/src/index.css):
-light is the base, and the dark block only redefines the same names. No
-component carries a `dark:` variant — `bg-card`, `text-ink2`, `border-line` and
-the rest simply resolve differently.
-
-| Token | Light | Dark |
-|---|---|---|
-| page / surface / card | `#f9f9f7` `#fcfcfb` `#ffffff` | `#131312` `#1a1a19` `#1f1f1e` |
-| ink / secondary / muted | `#0b0b0b` `#52514e` `#898781` | `#ffffff` `#c3c2b7` `#898781` |
-| brand (links, focus) | `#2a78d6` | `#3987e5` |
-| not OK | `#d03b3b` on white | `#e66767` on near-black |
-
-Status fills carry their own ink token, because white on red works on paper but
-the dark theme's lighter red needs dark ink (6.1:1) to stay legible.
-
-The **class hues are tokens too** — see
-[`web/src/lib/colors.js`](web/src/lib/colors.js), which returns
-`var(--color-cls-N)` rather than a literal, so the palette follows the theme
-with no React state involved. Both columns are validated for colour-blind
-separation against their own surface (worst adjacent ΔE 9.1 light, 8.4 dark).
-Colour follows the class index, never its rank.
-
-> One Tailwind v4 trap worth knowing: `@theme` only emits variables that some
-> utility class references. These are used from inline `style` via `var()`, so
-> the block is declared `@theme static` — without it seven of the eight hues are
-> dropped and the donuts render nearly transparent.
+If names stop arriving, the Review page says so in a red bar and the server
+prints the same warning once to `docker compose logs browser`. Nothing is lost
+when that happens, only unattributed, and anyone can clean up the orphans.
 
 ## API
 
@@ -145,30 +138,20 @@ Everything the UI does is a plain HTTP call, so scripts can use it too.
 | `GET /api/review/export?v=` | review log as CSV |
 | `GET /api/refresh` | drop the scan and flag caches |
 | `POST /api/flag` | `{v, split, image, status, reviewer}` |
-| `POST /api/comment` | `{v, split, image, text, reviewer}` |
+| `POST /api/comment` | `{v, split, image, text, reviewer}`; add `id` to reword that comment |
 | `POST /api/comment/delete` | `{v, split, image, id, reviewer}` — author only |
 | `GET /img?v=&split=&n=&t=1` | full image, or a cached thumbnail |
 | `GET /file?path=` | one file |
 | `GET /download?path=&exclude=1` | streamed zip; `exclude=1` drops rejected images |
 
-Each `POST` answers with the image's whole flag — verdict plus the full thread
-— so a client that missed someone else's comment catches up on its next write.
-
 `mode` is `all｜unreviewed｜ok｜no｜commented｜unlabeled｜empty`. `cls` takes one
 class index or a comma list (`0,2,5`); `clsmode=any` (default) keeps images
-holding at least one of them, `clsmode=all` only those holding every one.
+holding at least one, `clsmode=all` only those holding every one. Each `POST`
+answers with the image's whole flag, verdict and full thread.
 
-Zips are streamed with chunked transfer encoding as the files are read, so a
-multi-gigabyte version starts downloading immediately and is never staged in
-memory or on disk.
+Zips are streamed as the files are read, so a multi-gigabyte version starts
+downloading immediately and is never staged in memory or on disk.
 
-### Older review logs
-
-Logs written by the previous UI used `ok｜fix｜drop`. Both `fix` and `drop` read
-back as `no`, so existing review work on the NUC carries over untouched — the
-original lines stay exactly as they were written.
-
-Those logs also carried the rejection reason inline on the verdict, one `note`
-per image with the last one winning. Each becomes the first comment in that
-image's thread, in a single reserved slot — so an image re-saved three times
-while somebody typed shows the one finished comment, not three drafts of it.
+**Older logs** written by the previous UI used `ok｜fix｜drop`; `fix` and `drop`
+read back as `no`, and the inline rejection `note` becomes the first comment in
+that image's thread. Existing review work carries over untouched.
