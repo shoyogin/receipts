@@ -60,10 +60,14 @@ comment box focused.
 any number of reviewers, whether or not it has a verdict — so a question from
 one person and the answer from the next both survive, and marking an image OK or
 not OK later does not disturb what was written. `⌘↵` / `ctrl↵` sends; plain
-`↵` is a newline. You can delete your own comments and nobody else's; behind
-`--user-header` that is enforced against the proxy's identity, and without it
-against the self-declared name, where it is a courtesy rather than a control.
-The card shows a bubble and a count, and *Show → Has comments* filters to them.
+`↵` is a newline. **edit** rewords one of your own in place and **×** removes
+it — behind `--user-header` that is enforced against the proxy's identity, and
+without it against the self-declared name, where it is a courtesy rather than a
+control. Editing keeps the comment's original author and position in the thread
+and marks it *edited*; the log keeps every version, so nothing is lost. Comments
+filed under `unauthenticated` (see below) belong to nobody and anyone may clear
+them. The card shows a bubble and a count, and *Show → Has comments* filters to
+them.
 
 Verdicts and comments go to one append-only JSONL log per version/split under
 `--review`, never into the dataset. A verdict is the last one written; a comment
@@ -82,6 +86,19 @@ Unchanged from before: `compose.yaml` runs the app with no published ports and
 Caddy as the sole entrypoint on the VPN address, doing `basic_auth` and setting
 `X-Remote-User`. With `--user-header X-Remote-User` the reviewer name comes from
 the proxy and any client-sent name is ignored.
+
+> **Do not add a `header_up -X-Remote-User` line** to the `reverse_proxy` block.
+> It looks like hardening and is the opposite: Caddy applies header operations
+> add, then set, then delete, so a deletion written *after* `header_up
+> X-Remote-User {http.auth.user.id}` strips the value that line just wrote. The
+> app then sees no identity and files everything under `unauthenticated`. The
+> `header_up` is a *set*, so it already replaces anything the client sent —
+> there is nothing left to guard against.
+
+If names ever stop arriving, the UI says so in a red bar across the Review page
+and the server prints the same warning once to its log — `docker compose logs
+browser`. Work is never lost when this happens, only unattributed, and the
+orphaned entries can be cleaned up by anyone once identity is flowing again.
 
 ```bash
 docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
@@ -145,7 +162,7 @@ Everything the UI does is a plain HTTP call, so scripts can use it too.
 | `GET /api/review/export?v=` | review log as CSV |
 | `GET /api/refresh` | drop the scan and flag caches |
 | `POST /api/flag` | `{v, split, image, status, reviewer}` |
-| `POST /api/comment` | `{v, split, image, text, reviewer}` |
+| `POST /api/comment` | `{v, split, image, text, reviewer}`; add `id` to reword that comment |
 | `POST /api/comment/delete` | `{v, split, image, id, reviewer}` — author only |
 | `GET /img?v=&split=&n=&t=1` | full image, or a cached thumbnail |
 | `GET /file?path=` | one file |

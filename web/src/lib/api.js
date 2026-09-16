@@ -35,7 +35,14 @@ async function write(url, body) {
 
 export const saveFlag = (body) => write('/api/flag', body)
 export const addComment = (body) => write('/api/comment', body)
+/** Same route with the comment's id: the log gets a second line under that id
+ *  and the replay treats it as a rewording of the first. */
+export const editComment = (body) => write('/api/comment', body)
 export const deleteComment = (body) => write('/api/comment/delete', body)
+
+/** Written in place of a name when the proxy was meant to supply one and did
+ *  not. Nobody owns those, so anybody may tidy them up. */
+export const UNOWNED = 'unauthenticated'
 
 export const imgUrl = (v, split, name, thumb) =>
   '/img?' + qs(thumb ? { t: 1, v, split, n: name } : { v, split, n: name })

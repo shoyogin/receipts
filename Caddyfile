@@ -25,8 +25,7 @@
     }
 
     reverse_proxy browser:8800 {
-        # Drop any client-supplied identity, then set it from basic_auth.
-        header_up -X-Remote-User
+        # Identity from basic_auth; header_up replaces whatever the client sent.
         header_up X-Remote-User {http.auth.user.id}
 
         # Dataset zips are streamed chunk by chunk as they are read off disk.

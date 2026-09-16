@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BoxOverlay from '../components/BoxOverlay'
 import {
-  addComment, deleteComment, folderZipUrl, getItems, getSummary, imgUrl,
-  reviewCsvUrl, saveFlag,
+  UNOWNED, addComment, deleteComment, editComment, folderZipUrl, getItems,
+  getSummary, imgUrl, reviewCsvUrl, saveFlag,
 } from '../lib/api'
 import { classColor } from '../lib/colors'
 import { bytes, nf, splitLabel, when } from '../lib/format'
@@ -173,6 +173,16 @@ export default function Review() {
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">
+        {meta?.user_header && !meta.user && (
+          <div className="border-b border-line bg-no-fill px-5 py-2 text-[13px] text-no-ink">
+            <b>Nobody's name is reaching the server.</b> It is set up to take the
+            reviewer from the <code>{meta.user_header}</code> header, but the proxy
+            is not sending it, so verdicts and comments are being filed under
+            “{UNOWNED}”. They are saved, just unattributed — worth fixing before
+            reviewing further.
+          </div>
+        )}
+
         <div className="flex items-center gap-3 border-b border-line bg-surface px-5 py-2.5 text-sm">
           <strong>{version} · {splitLabel(split)}</strong>
           <span className="num text-muted">{nf(items.length)} of {nf(total)}</span>
@@ -465,6 +475,15 @@ function Thread({ item, version, split, who, boxRef, onFlag }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const me = who.trim() || 'anon'
+  // A comment the proxy failed to attribute belongs to nobody, and the server
+  // lets anyone tidy those up. Mirror that here or the buttons never appear.
+  const mine = (c) => (c.reviewer || 'anon') === me || c.reviewer === UNOWNED
+
+  const save = async (id, text) => {
+    onFlag(item.name, await editComment({
+      v: version, split, image: item.name, id, text, reviewer: who.trim(),
+    }))
+  }
 
   const send = async () => {
     const body = text.trim()
@@ -506,22 +525,10 @@ function Thread({ item, version, split, who, boxRef, onFlag }) {
       ) : (
         <ul className="space-y-2">
           {comments.map((c) => (
-            <li key={c.id} className="rounded-md border border-line bg-page px-2.5 py-1.5">
-              <div className="flex items-baseline gap-2 text-[11px] text-muted">
-                <b className="font-semibold text-ink2">{c.reviewer || 'anon'}</b>
-                <span className="num">{when(c.ts)}</span>
-                <span className="flex-1" />
-                {(c.reviewer || 'anon') === me && (
-                  <button
-                    onClick={() => remove(c.id)} title="Delete this comment"
-                    className="rounded px-1 leading-none hover:bg-hover hover:text-no"
-                  >
-                    ×
-                  </button>
-                )}
-              </div>
-              <p className="mt-0.5 whitespace-pre-wrap break-words text-sm">{c.text}</p>
-            </li>
+            <Comment
+              key={c.id} c={c} mine={mine(c)}
+              onEdit={(text) => save(c.id, text)} onDelete={() => remove(c.id)}
+            />
           ))}
         </ul>
       )}
@@ -550,5 +557,94 @@ function Thread({ item, version, split, who, boxRef, onFlag }) {
         Every comment on an image marked not OK travels with it into EXCLUDED.csv.
       </p>
     </div>
+  )
+}
+
+
+/** One comment, readable until you click edit. Only the author's own comments
+ *  offer the buttons; the server enforces the same rule regardless. */
+function Comment({ c, mine, onEdit, onDelete }) {
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState(c.text)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  const start = () => { setDraft(c.text); setError(''); setEditing(true) }
+
+  const commit = async () => {
+    const text = draft.trim()
+    if (!text || busy) return
+    if (text === c.text) return setEditing(false)
+    setBusy(true)
+    try {
+      await onEdit(text)
+      setEditing(false)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const drop = async () => {
+    setError('')
+    try {
+      await onDelete()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  return (
+    <li className="rounded-md border border-line bg-page px-2.5 py-1.5">
+      <div className="flex items-baseline gap-2 text-[11px] text-muted">
+        <b className="font-semibold text-ink2">{c.reviewer || 'anon'}</b>
+        <span className="num">{when(c.ts)}</span>
+        {c.edited && <span title={`edited ${when(c.edited)}`}>edited</span>}
+        <span className="flex-1" />
+        {mine && !editing && (
+          <>
+            <button onClick={start} title="Edit this comment"
+                    className="rounded px-1 hover:bg-hover hover:text-ink">edit</button>
+            <button onClick={drop} title="Delete this comment"
+                    className="rounded px-1 leading-none hover:bg-hover hover:text-no">×</button>
+          </>
+        )}
+      </div>
+
+      {editing ? (
+        <>
+          <textarea
+            autoFocus value={draft} onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              // Both keys are claimed by the viewer behind this panel, so stop
+              // them here: esc would close the image, not the edit box.
+              if (e.key === 'Escape') { e.stopPropagation(); setEditing(false) }
+              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault(); e.stopPropagation(); commit()
+              }
+            }}
+            className="mt-1 min-h-[58px] w-full resize-y rounded-md border border-rule bg-card p-2 text-sm"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={commit} disabled={busy || !draft.trim()}
+              className="rounded-md border border-rule bg-card px-2.5 py-1 text-xs hover:bg-hover disabled:opacity-45"
+            >
+              {busy ? 'Saving…' : 'Save'}
+            </button>
+            <button onClick={() => setEditing(false)}
+                    className="rounded-md px-2 py-1 text-xs text-ink2 hover:bg-hover">
+              Cancel
+            </button>
+            <span className="text-[11px] text-muted">⌘↵ save · esc cancel</span>
+          </div>
+        </>
+      ) : (
+        <p className="mt-0.5 whitespace-pre-wrap break-words text-sm">{c.text}</p>
+      )}
+
+      {error && <p className="mt-1 text-[11px] text-no">{error}</p>}
+    </li>
   )
 }
