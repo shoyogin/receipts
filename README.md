@@ -99,6 +99,19 @@ on the VPN address, doing `basic_auth` and setting `X-Remote-User`. With
 `--user-header X-Remote-User` the reviewer name comes from the proxy and any
 client-sent name is ignored.
 
+> **Do not add a `header_up -X-Remote-User` line** to the `reverse_proxy` block.
+> It looks like hardening and is the opposite: Caddy applies header operations
+> add, then set, then delete, so a deletion written *after* `header_up
+> X-Remote-User {http.auth.user.id}` strips the value that line just wrote. The
+> app then sees no identity and files everything under `unauthenticated`. The
+> `header_up` is a *set*, so it already replaces anything the client sent —
+> there is nothing left to guard against.
+
+If names ever stop arriving, the UI says so in a red bar across the Review page
+and the server prints the same warning once to its log — `docker compose logs
+browser`. Work is never lost when this happens, only unattributed, and the
+orphaned entries can be cleaned up by anyone once identity is flowing again.
+
 ```bash
 docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
 docker compose up -d

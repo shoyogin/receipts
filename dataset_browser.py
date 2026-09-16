@@ -70,6 +70,12 @@ LEGACY_STATUS = {"fix": "no", "drop": "no"}
 NOTE_ID = "note"
 COMMENT_MAX = 2000
 
+# What gets written when --user-header is set but the proxy sent no identity.
+# Those comments belong to nobody, so anyone may edit or delete them — the
+# alternative is a thread of orphans that no reviewer can ever clean up.
+UNOWNED = "unauthenticated"
+_warned_no_identity = False
+
 
 def now_iso():
     # Milliseconds, so two comments typed in the same second still sort right.
@@ -348,11 +354,17 @@ def replay(entry, rec):
         if rec.get("deleted"):
             entry["comments"].pop(cid, None)
         else:
+            # An id already in the thread means an edit. Keep the original
+            # author and time — a reworded comment is the same comment, and
+            # re-dating it would shuffle the thread out from under whoever is
+            # reading it — and remember that it was changed.
+            was = entry["comments"].get(cid)
             entry["comments"][cid] = {
                 "id": cid,
                 "text": rec.get("text", ""),
-                "reviewer": rec.get("reviewer", ""),
-                "ts": rec.get("ts", ""),
+                "reviewer": was["reviewer"] if was else rec.get("reviewer", ""),
+                "ts": was["ts"] if was else rec.get("ts", ""),
+                "edited": rec.get("ts", "") if was else "",
             }
         return
 
@@ -371,7 +383,7 @@ def replay(entry, rec):
         if note:
             entry["comments"][NOTE_ID] = {"id": NOTE_ID, "text": note,
                                           "reviewer": rec.get("reviewer", ""),
-                                          "ts": rec.get("ts", "")}
+                                          "ts": rec.get("ts", ""), "edited": ""}
         else:
             entry["comments"].pop(NOTE_ID, None)
 
@@ -457,13 +469,28 @@ def append_flag(version, split, image, status, reviewer):
     })
 
 
-def append_comment(version, split, image, text, reviewer):
+def owned_comment(version, split, image, cid, reviewer):
+    """The comment cid, if reviewer is allowed to change it."""
+    entry = load_flags(version, split).get(image)
+    existing = entry["comments"].get(cid) if entry else None
+    if not existing:
+        raise FileNotFoundError("unknown comment")
+    author = existing["reviewer"] or "anon"
+    if author != UNOWNED and author != (reviewer or "anon"):
+        raise PermissionError("not your comment")
+    return existing
+
+
+def append_comment(version, split, image, text, reviewer, cid=None):
+    """Write a comment. With cid, reword the one already under that id."""
     text = (text or "").strip()
     if not text:
         raise ValueError("empty comment")
+    if cid:
+        owned_comment(version, split, image, cid, reviewer)
     return append_record(version, split, {
         "kind": "comment",
-        "id": uuid.uuid4().hex[:12],
+        "id": cid or uuid.uuid4().hex[:12],
         "ts": now_iso(),
         "image": image,
         "text": text[:COMMENT_MAX],
@@ -472,13 +499,8 @@ def append_comment(version, split, image, text, reviewer):
 
 
 def delete_comment(version, split, image, cid, reviewer):
-    """Tombstone one comment. Only its author may, and the log keeps the pair."""
-    entry = load_flags(version, split).get(image)
-    existing = entry["comments"].get(cid) if entry else None
-    if not existing:
-        raise FileNotFoundError("unknown comment")
-    if (existing["reviewer"] or "anon") != (reviewer or "anon"):
-        raise PermissionError("not your comment")
+    """Tombstone one comment. The log keeps both the comment and its removal."""
+    owned_comment(version, split, image, cid, reviewer)
     return append_record(version, split, {
         "kind": "comment",
         "id": cid,
@@ -788,6 +810,9 @@ class Handler(BaseHTTPRequestHandler):
                     "comment_max": COMMENT_MAX,
                     "writable": os.access(REVIEW, os.W_OK) if REVIEW.exists() else False,
                     "user": (self.headers.get(USER_HEADER) or "") if USER_HEADER else None,
+                    # Set but empty means the proxy is configured and silent —
+                    # a misconfiguration the UI should not let pass unmentioned.
+                    "user_header": USER_HEADER,
                 })
             if u.path == "/api/review/summary":
                 out = {}
@@ -872,8 +897,26 @@ class Handler(BaseHTTPRequestHandler):
         # An authenticated proxy wins over the self-declared name.
         who = body.get("reviewer", "")
         if USER_HEADER:
-            who = self.headers.get(USER_HEADER) or "unauthenticated"
+            who = self.headers.get(USER_HEADER) or ""
+            if not who:
+                self._warn_no_identity()
+                who = UNOWNED
         return body["v"], body["split"], body["image"], who
+
+    def _warn_no_identity(self):
+        """Say so once, loudly. Getting this wrong is silent otherwise: every
+        verdict and comment is still saved, just filed under nobody."""
+        global _warned_no_identity
+        if _warned_no_identity:
+            return
+        _warned_no_identity = True
+        sys.stderr.write(
+            f"\n!! --user-header {USER_HEADER} is set, but no request carries it.\n"
+            f"!! Verdicts and comments are being filed under \"{UNOWNED}\".\n"
+            "!! The proxy is not passing the header. In Caddy, check that the\n"
+            "!! reverse_proxy block sets it and that no `header_up -" + str(USER_HEADER) +
+            "`\n!! line follows: header ops apply add, set, then delete, so a\n"
+            "!! deletion written after the set strips the value again.\n\n")
 
     def do_POST(self):
         u = urlparse(self.path)
@@ -889,7 +932,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/flag":
                 append_flag(v, sp, img, body.get("status", ""), who)
             elif u.path == "/api/comment":
-                append_comment(v, sp, img, body.get("text", ""), who)
+                cid = body.get("id")
+                if cid is not None and (not isinstance(cid, str) or not cid):
+                    return self._json({"error": "bad id"}, 400)
+                append_comment(v, sp, img, body.get("text", ""), who, cid)
             else:
                 cid = body.get("id")
                 if not isinstance(cid, str) or not cid:
