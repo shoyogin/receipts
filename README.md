@@ -139,7 +139,13 @@ and the server prints the same warning once to its log — `docker compose logs
 browser`. Work is never lost when this happens, only unattributed, and the
 orphaned entries can be cleaned up by anyone once identity is flowing again.
 
+Each host keeps its own `.env` (untracked — copy `.env.example`). `BIND_ADDR` is
+the VPN address Caddy binds to; leave it out and the app listens on loopback
+only, so a missing `.env` makes it unreachable rather than exposed on every
+interface.
+
 ```bash
+cp .env.example .env && ${EDITOR:-nano} .env    # once per host
 docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
 docker compose up -d
 ```
