@@ -61,9 +61,11 @@ _scan_cache = {}
 _flag_lock = threading.Lock()
 _flags = {}          # (version, split) -> {image: entry}
 
-# A verdict is a keep/reject decision. "fix" and "drop" are what older logs on
-# the NUC wrote; both mean "not ok" and fold into "no" when read back.
-STATUSES = ("ok", "no")
+# A verdict is a keep/reject decision. "review" sits between the two: somebody
+# redrew the boxes and the fix is waiting for a second pair of eyes. "fix" and
+# "drop" are what older logs on the NUC wrote; both mean "not ok" and fold into
+# "no" when read back.
+STATUSES = ("ok", "no", "review")
 LEGACY_STATUS = {"fix": "no", "drop": "no"}
 
 # Reserved comment id for the single inline note older logs wrote on the verdict.
@@ -75,6 +77,23 @@ COMMENT_MAX = 2000
 # alternative is a thread of orphans that no reviewer can ever clean up.
 UNOWNED = "unauthenticated"
 _warned_no_identity = False
+
+# The dataset is mounted read-only and this server never writes to it, so a
+# corrected label file lives in the review log and is substituted into the zip
+# at download time. One image's worth; a dense frame is a few KB.
+BOXES_MAX = 1000
+MIN_SIDE = 0.002     # a box thinner than this is a slipped click, not a label
+
+# Every route that accepts a body, and how much of one. A relabel carries a
+# whole image's geometry; a verdict carries a word. They do not need the same
+# ceiling, and one generous limit everywhere would only widen the others.
+POST_MAX = {
+    "/api/flag": 64_000,
+    "/api/comment": 64_000,
+    "/api/comment/delete": 64_000,
+    "/api/labels": 512_000,
+    "/api/labels/revert": 64_000,
+}
 
 
 def now_iso():
@@ -204,6 +223,13 @@ def read_classes(version: str):
     return [], ""
 
 
+def label_file(version: str, split: str, image: str) -> Path:
+    """The label file the dataset itself holds for one image. It need not exist."""
+    sub = Path(version) / "labels"
+    return safe_under_root(sub / split / image if split != "." else sub / image
+                           ).with_suffix(".txt")
+
+
 def parse_label(path: Path):
     """Return list of [cls, xc, yc, w, h] from a YOLO txt. Ignores malformed lines."""
     boxes = []
@@ -278,15 +304,21 @@ def stats_for(version: str):
     split_counts = {}
     for sp in list_splits(version):
         items = scan(version, sp)
+        # Count what the version would export, not what is on disk: an image
+        # whose boxes were redrawn is counted as redrawn.
+        flags = load_flags(version, sp)
         splits[sp] = len(items)
         total += len(items)
         per = {}
         for it in items:
-            if not it["labeled"]:
+            entry = flags.get(it["name"])
+            boxes = merged_boxes(it, entry)
+            fixed = entry is not None and entry["boxes"] is not None
+            if not it["labeled"] and not fixed:
                 unlabeled += 1
-            elif not it["boxes"]:
+            elif not boxes:
                 empty += 1
-            for b in it["boxes"]:
+            for b in boxes:
                 counts[b[0]] = counts.get(b[0], 0) + 1
                 per[b[0]] = per.get(b[0], 0) + 1
         split_counts[sp] = per
@@ -341,12 +373,24 @@ def review_path(version: str, split: str) -> Path:
 
 
 def blank_entry():
-    """What the log replays into: one verdict, plus a thread of comments."""
-    return {"status": "", "reviewer": "", "ts": "", "comments": {}}
+    """What the log replays into: a verdict, a thread of comments, and the
+    corrected boxes if anyone has redrawn them. `boxes` None means nobody has —
+    the label file on disk still speaks for the image."""
+    return {"status": "", "reviewer": "", "ts": "", "comments": {},
+            "boxes": None, "boxes_by": "", "boxes_ts": ""}
 
 
 def replay(entry, rec):
     """Fold one log line into an image's entry. Called in file order."""
+    if rec.get("kind") == "labels":
+        boxes = rec.get("boxes")
+        # A null reverts to the dataset's own file rather than erasing history:
+        # the line that drew them is still in the log above this one.
+        entry["boxes"] = None if boxes is None else [list(b) for b in boxes]
+        entry["boxes_by"] = "" if boxes is None else rec.get("reviewer", "")
+        entry["boxes_ts"] = "" if boxes is None else rec.get("ts", "")
+        return
+
     if rec.get("kind") == "comment":
         cid = rec.get("id")
         if not cid:
@@ -423,13 +467,44 @@ def thread(entry):
 
 def flag_view(entry):
     """The shape the API hands out. Never the internal entry: its comments are
-    a dict keyed by id, which is replay bookkeeping the client has no use for."""
+    a dict keyed by id, which is replay bookkeeping the client has no use for.
+
+    `corrected_by` is what the four-eyes rule turns on, so the client can grey
+    out the accept button for the person who drew them and name whoever else
+    the image is waiting on."""
     return {"status": entry["status"], "reviewer": entry["reviewer"],
-            "ts": entry["ts"], "comments": thread(entry)}
+            "ts": entry["ts"], "comments": thread(entry),
+            "corrected": entry["boxes"] is not None,
+            "corrected_by": entry["boxes_by"], "corrected_ts": entry["boxes_ts"]}
 
 
 def flag_of(version, split, image):
     return flag_view(load_flags(version, split).get(image) or blank_entry())
+
+
+def merged_boxes(item, entry):
+    """The boxes that count for one image: a reviewer's redraw if there is one,
+    otherwise what the label file on disk says. The single place corrections
+    are applied, so the grid, the stats and the download cannot disagree."""
+    if entry is not None and entry["boxes"] is not None:
+        return entry["boxes"]
+    return item["boxes"]
+
+
+def label_text(boxes):
+    """Boxes back out as a YOLO label file."""
+    return "".join(f"{int(b[0])} {b[1]:.6f} {b[2]:.6f} {b[3]:.6f} {b[4]:.6f}\n"
+                   for b in boxes)
+
+
+def merged_item(item, entry):
+    """One scanned image with its review state folded in, as the API hands it
+    out. A corrected image reports the boxes it will actually ship with."""
+    boxes = merged_boxes(item, entry)
+    return dict(item, boxes=boxes,
+                labeled=item["labeled"] or (entry is not None
+                                            and entry["boxes"] is not None),
+                flag=flag_view(entry) if entry is not None else None)
 
 
 def comment_digest(entry):
@@ -460,6 +535,15 @@ def append_record(version, split, rec):
 def append_flag(version, split, image, status, reviewer):
     if status not in STATUSES + ("",):
         raise ValueError("bad status")
+    if status == "ok":
+        # Four eyes: nobody signs off their own redraw. Marking it "no" stays
+        # open to them — that withdraws a fix, which only ever takes an image
+        # out of the export, and refusing it would strand their own mistake.
+        entry = load_flags(version, split).get(image)
+        drew = entry["boxes_by"] if entry and entry["boxes"] is not None else ""
+        if drew and drew == (reviewer or "anon"):
+            raise PermissionError(
+                "you corrected this image — someone else has to accept it")
     return append_record(version, split, {
         "kind": "status",
         "ts": now_iso(),
@@ -479,6 +563,70 @@ def owned_comment(version, split, image, cid, reviewer):
     if author != UNOWNED and author != (reviewer or "anon"):
         raise PermissionError("not your comment")
     return existing
+
+
+def clean_boxes(raw):
+    """Validate client-drawn boxes into [cls, xc, yc, w, h] rows.
+
+    This ends up as a label file inside somebody's download, so it is checked
+    rather than trusted: finite numbers, a real class index, and a box that
+    actually lies on the image."""
+    if not isinstance(raw, list):
+        raise ValueError("boxes must be a list")
+    if len(raw) > BOXES_MAX:
+        raise ValueError(f"too many boxes (max {BOXES_MAX})")
+    out = []
+    for b in raw:
+        if not isinstance(b, (list, tuple)) or len(b) != 5:
+            raise ValueError("each box is [class, x, y, w, h]")
+        try:
+            c = int(b[0])
+            x, y, w, h = (float(v) for v in b[1:])
+        except (TypeError, ValueError):
+            raise ValueError("box values must be numbers") from None
+        if not all(v == v and abs(v) != float("inf") for v in (x, y, w, h)):
+            raise ValueError("box values must be finite")
+        if not 0 <= c <= 9999:
+            raise ValueError("class index out of range")
+        # Clamp to the frame rather than rejecting: a drag that ran off the
+        # edge of the image is a normal gesture, not a bad request.
+        w, h = min(max(w, MIN_SIDE), 1.0), min(max(h, MIN_SIDE), 1.0)
+        x, y = min(max(x, w / 2), 1 - w / 2), min(max(y, h / 2), 1 - h / 2)
+        out.append([c, round(x, 6), round(y, 6), round(w, 6), round(h, 6)])
+    return out
+
+
+def append_labels(version, split, image, boxes, reviewer):
+    """Store a redraw, then flip the image to "review" waiting for a second
+    opinion. Boxes first: a crash between the two lines leaves a correction
+    nobody has claimed, never a "review" with nothing behind it."""
+    who = (reviewer or "anon")[:64]
+    append_record(version, split, {
+        "kind": "labels",
+        "ts": now_iso(),
+        "image": image,
+        "boxes": clean_boxes(boxes),
+        "reviewer": who,
+    })
+    return append_flag(version, split, image, "review", who)
+
+
+def revert_labels(version, split, image, reviewer):
+    """Drop a correction and send the image back to where it came from."""
+    entry = load_flags(version, split).get(image)
+    if not entry or entry["boxes"] is None:
+        raise FileNotFoundError("nothing to revert")
+    who = (reviewer or "anon")[:64]
+    append_record(version, split, {
+        "kind": "labels",
+        "ts": now_iso(),
+        "image": image,
+        "boxes": None,
+        "reviewer": who,
+    })
+    # Back to "not OK": that is the state it was in before anyone fixed it, and
+    # leaving it in "review" would queue an approval with no redraw to approve.
+    return append_flag(version, split, image, "no", who)
 
 
 def append_comment(version, split, image, text, reviewer, cid=None):
@@ -511,14 +659,30 @@ def delete_comment(version, split, image, cid, reviewer):
     })
 
 
-def rejected(version: str):
-    """{split: {image: entry}} for every image a reviewer marked "no"."""
+# What an export leaves behind: rejects, and fixes still waiting on a second
+# pair of eyes. An approved fix is "ok" by then and ships like anything else.
+HELD_BACK = ("no", "review")
+
+
+def rejected(version: str, statuses=HELD_BACK):
+    """{split: {image: entry}} for every image the export holds back."""
     out = {}
     for sp in list_splits(version):
         bad = {img: r for img, r in load_flags(version, sp).items()
-               if r.get("status") == "no"}
+               if r.get("status") in statuses}
         if bad:
             out[sp] = bad
+    return out
+
+
+def corrected(version: str):
+    """{split: {image: entry}} for every redraw that ships — accepted fixes."""
+    out = {}
+    for sp in list_splits(version):
+        fixed = {img: r for img, r in load_flags(version, sp).items()
+                 if r["boxes"] is not None and r.get("status") not in HELD_BACK}
+        if fixed:
+            out[sp] = fixed
     return out
 
 
@@ -643,41 +807,93 @@ def zip_into(writer, base: Path, arc_root: str, skip=None, extra=None):
                        zipfile.ZIP_DEFLATED)
 
 
+def built_line():
+    return ("# built "
+            + datetime.datetime.now().astimezone().isoformat(timespec="seconds"))
+
+
 def exclusion_manifest(version, rej):
-    """The receipt that travels inside a filtered download."""
+    """The receipt for what an export left out."""
     n = sum(len(v) for v in rej.values())
     out = [
         f"# {version} — filtered export",
-        f"# built {datetime.datetime.now().astimezone().isoformat(timespec='seconds')}",
-        f"# {n} image{'' if n == 1 else 's'} excluded after review",
+        built_line(),
+        f"# {n} image{'' if n == 1 else 's'} held back after review",
+        "# status no = rejected; review = corrected, still waiting to be accepted",
         "",
-        "split,image,reviewer,timestamp,comments",
+        "split,image,status,reviewer,timestamp,comments",
     ]
     for sp in sorted(rej):
         for img, r in sorted(rej[sp].items()):
             out.append(",".join(csv_cell(x) for x in (
-                sp, img, r.get("reviewer", ""), r.get("ts", ""), comment_digest(r))))
+                sp, img, r.get("status", ""), r.get("reviewer", ""),
+                r.get("ts", ""), comment_digest(r))))
     return "\n".join(out) + "\n"
 
 
-def exclusion_filter(version):
-    """(skip, manifest) that drop every rejected image and its label file."""
-    rej = rejected(version)
-    if not rej:
+def correction_manifest(version, fix):
+    """The receipt for the labels this export replaced."""
+    n = sum(len(v) for v in fix.values())
+    out = [
+        f"# {version} — corrected labels",
+        built_line(),
+        f"# {n} label file{'' if n == 1 else 's'} redrawn during review and "
+        "accepted; the dataset on disk is unchanged",
+        "",
+        "split,image,boxes,corrected_by,corrected_at,accepted_by,comments",
+    ]
+    for sp in sorted(fix):
+        for img, r in sorted(fix[sp].items()):
+            out.append(",".join(csv_cell(x) for x in (
+                sp, img, len(r["boxes"]), r["boxes_by"], r["boxes_ts"],
+                r.get("reviewer", ""), comment_digest(r))))
+    return "\n".join(out) + "\n"
+
+
+def label_arc(split: str, stem: str) -> str:
+    """Where one image's label file sits inside the zip."""
+    return f"labels/{stem}.txt" if split == "." else f"labels/{split}/{stem}.txt"
+
+
+def download_plan(version):
+    """(skip, extra) for a reviewed export.
+
+    Two jobs in one pass over the log: drop the images review held back, and
+    swap in the labels review redrew. A corrected file is written from `extra`
+    at the arcname its original would have had, so `skip` has to drop that
+    original too or the zip would carry the same path twice."""
+    rej, fix = rejected(version), corrected(version)
+    if not rej and not fix:
         return None, {}
+
     stems = {sp: {Path(i).stem for i in imgs} for sp, imgs in rej.items()}
     flat = {s for v in stems.values() for s in v}
+    extra, replaced = {}, {}
+    for sp, imgs in fix.items():
+        for img, r in imgs.items():
+            stem = Path(img).stem
+            extra[label_arc(sp, stem)] = label_text(r["boxes"])
+            replaced.setdefault(sp, set()).add(stem)
 
     def skip(rel: Path):
         parts = rel.parts
+        stem = Path(rel).stem
         if len(parts) >= 2 and parts[0] in ("images", "labels"):
             # <version>/images/<split>/name.jpg — match within that split only
             split = parts[1] if len(parts) > 2 else "."
-            return Path(rel).stem in stems.get(split, set())
-        # base is already inside one split, so the split is not in the path
-        return Path(rel).stem in flat
+            if stem in stems.get(split, set()):
+                return True
+            return parts[0] == "labels" and stem in replaced.get(split, set())
+        # Base is already inside one split, so the split is not in the path.
+        # Corrections are keyed by split and cannot be placed here, and this
+        # download is one folder rather than a version, so only rejects apply.
+        return stem in flat
 
-    return skip, {"EXCLUDED.csv": exclusion_manifest(version, rej)}
+    if rej:
+        extra["EXCLUDED.csv"] = exclusion_manifest(version, rej)
+    if fix:
+        extra["CORRECTED.csv"] = correction_manifest(version, fix)
+    return skip, extra
 
 
 # ---------------------------------------------------------------- http layer
@@ -736,7 +952,7 @@ class Handler(BaseHTTPRequestHandler):
         name = rel.parts[-1] if rel.parts and str(rel) != "." else "dataset"
         skip, extra = None, {}
         if exclude and version:
-            skip, extra = exclusion_filter(version)
+            skip, extra = download_plan(version)
             name += "-reviewed"
 
         self.send_response(200)
@@ -771,8 +987,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/items":
                 sp = q.get("split", ".")
                 flags = load_flags(q["v"], sp)
-                items = [dict(i, flag=flag_view(flags[i["name"]])
-                              if i["name"] in flags else None)
+                items = [merged_item(i, flags.get(i["name"]))
                          for i in scan(q["v"], sp)]
                 cls = q.get("cls", "")
                 mode = q.get("mode", "all")
@@ -815,13 +1030,34 @@ class Handler(BaseHTTPRequestHandler):
                     "user_header": USER_HEADER,
                 })
             if u.path == "/api/review/summary":
-                out = {}
+                out, seen = {}, 0
+                # Count only images that are still on disk: a verdict left in
+                # the log for a file since deleted must not make the totals
+                # claim more reviewed images than the version has.
                 for sp in list_splits(q["v"]):
-                    for r in load_flags(q["v"], sp).values():
-                        st = r.get("status")
+                    flags = load_flags(q["v"], sp)
+                    for it in scan(q["v"], sp):
+                        st = (flags.get(it["name"]) or {}).get("status")
                         if st:
                             out[st] = out.get(st, 0) + 1
+                            seen += 1
+                total = sum(len(scan(q["v"], sp)) for sp in list_splits(q["v"]))
+                out["total"] = total
+                out["unflagged"] = max(total - seen, 0)
                 return self._json(out)
+            if u.path == "/api/queue":
+                # The fix queue thinks in versions, not splits: the images
+                # waiting for work are wherever they happen to live.
+                want = {s for s in q.get("status", "no,review").split(",") if s}
+                out = []
+                for sp in list_splits(q["v"]):
+                    flags = load_flags(q["v"], sp)
+                    for it in scan(q["v"], sp):
+                        entry = flags.get(it["name"])
+                        if entry and entry.get("status") in want:
+                            out.append(dict(merged_item(it, entry), split=sp))
+                return self._json({"version": q["v"], "total": len(out),
+                                   "items": out})
             if u.path == "/api/review/rejects":
                 rej = rejected(q["v"])
                 return self._json({
@@ -921,10 +1157,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         u = urlparse(self.path)
         try:
-            if u.path not in ("/api/flag", "/api/comment", "/api/comment/delete"):
+            if u.path not in POST_MAX:
                 return self._send(404, b"not found", "text/plain")
             n = int(self.headers.get("Content-Length", 0))
-            if n > 64_000:
+            if n > POST_MAX[u.path]:
                 return self._json({"error": "payload too large"}, 413)
             body = json.loads(self.rfile.read(n) or b"{}")
             v, sp, img, who = self._target(body)
@@ -936,6 +1172,10 @@ class Handler(BaseHTTPRequestHandler):
                 if cid is not None and (not isinstance(cid, str) or not cid):
                     return self._json({"error": "bad id"}, 400)
                 append_comment(v, sp, img, body.get("text", ""), who, cid)
+            elif u.path == "/api/labels":
+                append_labels(v, sp, img, body.get("boxes"), who)
+            elif u.path == "/api/labels/revert":
+                revert_labels(v, sp, img, who)
             else:
                 cid = body.get("id")
                 if not isinstance(cid, str) or not cid:
@@ -944,7 +1184,13 @@ class Handler(BaseHTTPRequestHandler):
 
             # The whole thread comes back, so a client that missed somebody
             # else's comment catches up on its next write instead of drifting.
-            return self._json({"ok": True, "flag": flag_of(v, sp, img)})
+            # A relabel also answers with the boxes that are now current.
+            out = {"ok": True, "flag": flag_of(v, sp, img)}
+            if u.path.startswith("/api/labels"):
+                entry = load_flags(v, sp).get(img)
+                out["boxes"] = (entry["boxes"] if entry and entry["boxes"] is not None
+                                else parse_label(label_file(v, sp, img)))
+            return self._json(out)
         except PermissionError as e:
             return self._json({"error": str(e) or "forbidden"}, 403)
         except FileNotFoundError as e:

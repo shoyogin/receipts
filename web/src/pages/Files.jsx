@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import ConfirmDownload from '../components/ConfirmDownload'
 import { fileUrl, folderZipUrl, getRejects, getTree } from '../lib/api'
 import { bytes, nf } from '../lib/format'
 import { useData } from '../lib/store'
@@ -85,14 +86,13 @@ export default function Files() {
               Download {path ? 'this folder' : 'everything'} (.zip)
             </a>
             {atVersionRoot && (
-              <a
-                href={folderZipUrl(path, true)} download
-                title="Same version with every rejected image and its label left out"
-                className="rounded-md border border-rule bg-card px-3 py-2 text-sm hover:bg-hover"
+              <ConfirmDownload
+                version={path}
+                className="cursor-pointer rounded-md border border-rule bg-card px-3 py-2 text-sm hover:bg-hover"
               >
                 Download reviewed
-                {rejects?.total ? ` — ${nf(rejects.total)} excluded` : ''}
-              </a>
+                {rejects?.total ? ` — ${nf(rejects.total)} left out` : ''}
+              </ConfirmDownload>
             )}
           </div>
         </div>
