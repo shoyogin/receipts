@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import BoxOverlay from '../components/BoxOverlay'
+import ConfirmDownload from '../components/ConfirmDownload'
 import {
-  UNOWNED, addComment, deleteComment, editComment, folderZipUrl, getItems,
-  getSummary, imgUrl, reviewCsvUrl, saveFlag,
+  UNOWNED, addComment, deleteComment, editComment, getItems, getSummary,
+  imgUrl, reviewCsvUrl, saveFlag,
 } from '../lib/api'
 import { classColor } from '../lib/colors'
 import { bytes, nf, splitLabel, when } from '../lib/format'
@@ -13,6 +14,7 @@ const SHOW = [
   ['unreviewed', 'Not reviewed yet'],
   ['ok', 'Marked OK'],
   ['no', 'Marked not OK'],
+  ['review', 'Corrected, waiting to be accepted'],
   ['commented', 'Has comments'],
   ['unlabeled', 'Missing label file'],
   ['empty', 'Label file, no boxes'],
@@ -79,7 +81,9 @@ export default function Review() {
     reloadSummary()
   }, [reloadSummary])
 
-  const done = (summary.ok || 0) + (summary.no || 0)
+  const done = (summary.ok || 0) + (summary.no || 0) + (summary.review || 0)
+  // Rejects and fixes still waiting on approval both stay out of the export.
+  const held = (summary.no || 0) + (summary.review || 0)
 
   return (
     <div className="flex h-full">
@@ -151,18 +155,18 @@ export default function Review() {
         <div className="mt-5 space-y-1 border-t border-line pt-4 text-sm">
           <Fact label="Reviewed" value={`${nf(done)} / ${nf(stats?.total || 0)}`} />
           <Fact label="OK" value={nf(summary.ok || 0)} />
+          <Fact label="Review" value={nf(summary.review || 0)} accent="text-review" />
           <Fact label="Not OK" value={nf(summary.no || 0)} accent="text-no" />
         </div>
 
         <div className="mt-4 space-y-2">
-          <a
-            href={folderZipUrl(version, true)} download
-            title="The whole version, minus every image marked not OK and its label file"
-            className="block rounded-md bg-ink px-3 py-2 text-center text-sm font-semibold text-page hover:opacity-90"
+          <ConfirmDownload
+            version={version}
+            className="block cursor-pointer rounded-md bg-ink px-3 py-2 text-center text-sm font-semibold text-page hover:opacity-90"
           >
             Download reviewed dataset
-            {summary.no ? <span className="font-normal opacity-80"> — {nf(summary.no)} left out</span> : null}
-          </a>
+            {held ? <span className="font-normal opacity-80"> — {nf(held)} left out</span> : null}
+          </ConfirmDownload>
           <a
             href={reviewCsvUrl(version)} download
             className="block rounded-md border border-rule bg-card px-3 py-2 text-center text-sm hover:bg-hover"
@@ -250,13 +254,18 @@ const Fact = ({ label, value, accent }) => (
   </div>
 )
 
+const PILL = {
+  ok: ['OK', 'bg-ok-fill text-ok-ink'],
+  no: ['not OK', 'bg-no-fill text-no-ink'],
+  review: ['Review', 'bg-review-fill text-review-ink'],
+}
+
 function StatusPill({ status }) {
-  if (!status) return null
-  const ok = status === 'ok'
+  const pill = PILL[status]
+  if (!pill) return null
   return (
-    <span className={`absolute right-1.5 top-1.5 z-2 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
-      ok ? 'bg-ok-fill text-ok-ink' : 'bg-no-fill text-no-ink'}`}>
-      {ok ? 'OK' : 'not OK'}
+    <span className={`absolute right-1.5 top-1.5 z-2 rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${pill[1]}`}>
+      {pill[0]}
     </span>
   )
 }
@@ -291,7 +300,8 @@ function Card({ item, classes, version, split, onOpen }) {
       </div>
       <figcaption className={`flex items-center justify-between gap-2 rounded-b-lg border-t border-line px-2.5 py-1.5 text-xs ${
         status === 'ok' ? 'shadow-[inset_3px_0_0_var(--color-ok)]'
-        : status === 'no' ? 'shadow-[inset_3px_0_0_var(--color-no)]' : ''}`}>
+        : status === 'no' ? 'shadow-[inset_3px_0_0_var(--color-no)]'
+        : status === 'review' ? 'shadow-[inset_3px_0_0_var(--color-review-fill)]' : ''}`}>
         <span className="truncate text-ink2">{item.name}</span>
         {notes > 0 && (
           <span className="num flex shrink-0 items-center gap-1 text-muted"
@@ -321,6 +331,10 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
   }, [item])
 
   const status = item.flag?.status
+  // Four eyes: the server refuses an OK from whoever drew the boxes, so the
+  // button says so rather than letting the click fail.
+  const mine = !!item.flag?.corrected &&
+    item.flag.corrected_by === (who.trim() || 'anon')
 
   const commit = useCallback(async (verdict) => {
     setError('')
@@ -411,10 +425,20 @@ function Viewer({ items, index, classes, version, split, who, setWho, proxyUser,
 
           <div className="mt-5 border-t border-line pt-4">
             <h3 className="mb-2 text-xs font-medium text-ink2">Is this label correct?</h3>
+            {item.flag?.corrected && (
+              <p className="mb-2 rounded-md px-2 py-1.5 text-[11px]"
+                 style={{ background: 'var(--color-review-fill)',
+                          color: 'var(--color-review-ink)' }}>
+                Boxes redrawn by {mine ? 'you' : item.flag.corrected_by}
+                {item.flag.corrected_ts ? ` · ${when(item.flag.corrected_ts)}` : ''}.
+                {mine ? ' Someone else has to accept it.' : ' Accepting puts it back in the dataset.'}
+              </p>
+            )}
             <div className="flex gap-2">
               <button
-                onClick={() => commit('ok')}
-                className={`flex-1 rounded-md border px-3 py-2 text-sm ${
+                onClick={() => commit('ok')} disabled={mine}
+                title={mine ? 'You corrected this image — someone else has to accept it' : undefined}
+                className={`flex-1 rounded-md border px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-45 ${
                   status === 'ok' ? 'border-ok-fill bg-ok-fill font-semibold text-ok-ink'
                                   : 'border-rule bg-card hover:bg-hover'}`}
               >

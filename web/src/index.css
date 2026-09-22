@@ -32,6 +32,12 @@
   --color-no: #d03b3b;
   --color-no-fill: #d03b3b;
   --color-no-ink: #ffffff;      /* 4.8:1 on the fill */
+  /* Corrected, waiting to be accepted. The text step is darker than the fill
+     because amber bright enough to read black-on is only 2.6:1 as text on
+     white — the one status where the two cannot be the same colour. */
+  --color-review: #9a6700;      /* 4.9:1 on card, as text */
+  --color-review-fill: #d99000;
+  --color-review-ink: #0b0b0b;  /* 7.4:1 on the fill */
   --color-warn: #ec835a;
   --color-neutral: #c3c2b7;     /* "Other" slices, unfilled tracks */
 
@@ -73,6 +79,11 @@
     --color-no: #e66767;
     --color-no-fill: #e66767;
     --color-no-ink: #0b0b0b;    /* 6.1:1 on the lighter red */
+    /* On near-black the amber is legible as text too, so fill and text match
+       again and only the light theme needs the darker step. */
+    --color-review: #e0a33a;    /* 7.4:1 on card */
+    --color-review-fill: #e0a33a;
+    --color-review-ink: #0b0b0b;  /* 8.9:1 on the fill */
     --color-warn: #ec835a;
     --color-neutral: #55554f;
 
@@ -106,6 +117,9 @@
   --color-no: #e66767;
   --color-no-fill: #e66767;
   --color-no-ink: #0b0b0b;
+  --color-review: #e0a33a;
+  --color-review-fill: #e0a33a;
+  --color-review-ink: #0b0b0b;
   --color-warn: #ec835a;
   --color-neutral: #55554f;
 

@@ -24,7 +24,7 @@ export default function Stats() {
 
   const boxes = rows.reduce((a, r) => a + r.value, 0)
   const withBoxes = stats.total - stats.unlabeled - stats.empty
-  const reviewed = (summary.ok || 0) + (summary.no || 0)
+  const reviewed = (summary.ok || 0) + (summary.no || 0) + (summary.review || 0)
   const unused = rows.filter((r) => r.value === 0).length
   const used = rows.filter((r) => r.value > 0)
   const ratio = used.length ? used[0].value / used[used.length - 1].value : 0
@@ -90,6 +90,7 @@ export default function Stats() {
             centerLabel="images"
             data={[
               { key: 'ok', label: 'OK', value: summary.ok || 0, color: 'var(--color-ok)' },
+              { key: 'review', label: 'Corrected, waiting', value: summary.review || 0, color: 'var(--color-review-fill)' },
               { key: 'no', label: 'Not OK', value: summary.no || 0, color: 'var(--color-no)' },
               { key: 'todo', label: 'Not reviewed', value: Math.max(stats.total - reviewed, 0), color: GREY },
             ]}

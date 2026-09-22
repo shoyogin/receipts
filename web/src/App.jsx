@@ -2,12 +2,14 @@ import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
 import ThemeToggle from './components/ThemeToggle'
 import { DataProvider, useData } from './lib/store'
 import Files from './pages/Files'
+import Fix from './pages/Fix'
 import Review from './pages/Review'
 import Stats from './pages/Stats'
 
 const tabs = [
   { to: '/', label: 'Files', end: true },
   { to: '/review', label: 'Review' },
+  { to: '/fix', label: 'Fix' },
   { to: '/stats', label: 'Stats' },
 ]
 
@@ -72,6 +74,7 @@ function Shell() {
           <Routes>
             <Route path="/" element={<Files />} />
             <Route path="/review" element={<Review />} />
+            <Route path="/fix" element={<Fix />} />
             <Route path="/stats" element={<Stats />} />
             <Route path="*" element={<Files />} />
           </Routes>

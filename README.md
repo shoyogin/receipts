@@ -6,6 +6,7 @@ Review UI for YOLO dataset versions on a mounted disk.
 |---|---|
 | **Files** | Browse the folder tree and download it — a folder as a zip, a single file, or a whole version with the rejected images left out |
 | **Review** | Every image with its boxes and class names: filter, mark OK or not OK, comment |
+| **Fix** | The rejected images, with their boxes editable — redraw, reclassify, send for approval |
 | **Stats** | Image / class / box counts and how the classes are distributed |
 
 React + Vite + Tailwind in [`web/`](web/), served by a stdlib-only Python server
@@ -73,9 +74,9 @@ Versions are listed alphabetically, so every `t` sorts before every `v`.
 
 ## Reviewing
 
-A verdict is **OK** or **not OK**. Keyboard: `1` OK, `2` not OK, `←` `→` move,
-`esc` close. An OK jumps to the next image; a rejection stays put with the
-comment box focused.
+A verdict is **OK**, **not OK**, or **Review** — corrected and waiting to be
+accepted (yellow). Keyboard: `1` OK, `2` not OK, `←` `→` move, `esc` close. An
+OK jumps to the next image; a rejection stays put with the comment box focused.
 
 **Comments** are a thread. Any image takes any number of them from any number of
 reviewers, with or without a verdict, and a later verdict does not disturb them.
@@ -87,10 +88,36 @@ Verdicts and comments go to an append-only JSONL log per version/split under
 `--review`, never into the dataset. Nothing is ever rewritten, so the history of
 who said what is kept.
 
-**Downloading a cleaned version**: *Download reviewed dataset* streams the
-version as a zip with every image marked not OK — and its label file — left out,
-plus an `EXCLUDED.csv` listing what was dropped, by whom, and every comment on
-it. The dataset itself is untouched; the new version exists only in the zip.
+## Fixing
+
+Everything marked not OK collects on the **Fix** tab, across every split of the
+version. Open one and the boxes are editable: drag empty space to draw, drag
+inside a box to move it, corners and edges to resize, `1`–`9` to set the class,
+`⌫` to delete, `⌘Z` to undo.
+
+Saving does not pass a verdict. It marks the image **Review** and it waits there
+until somebody else accepts it on the Review tab — **nobody can accept their own
+correction**. Marking it not OK again stays open to whoever fixed it, since that
+only takes the image back out. *Revert to original* drops the correction and
+returns the image to not OK.
+
+Behind `--user-header` that rule is a real control. Without a proxy, names are
+self-declared and it is a courtesy.
+
+The dataset is mounted read-only and is never written to. A corrected label lives
+in the review log and is substituted into the zip at download time, so the
+corrected dataset exists only in the file you download.
+
+## Downloading a cleaned version
+
+*Download reviewed dataset* streams the version as a zip with the corrected
+labels in place of the originals, and with every image still marked not OK or
+Review — and its label file — left out. Two receipts travel inside:
+`EXCLUDED.csv` for what was held back and why, and `CORRECTED.csv` for which
+labels were redrawn and by whom. The dataset itself is untouched.
+
+If any image has never been flagged at all, the download asks first and says how
+many, rather than quietly shipping images nobody has looked at.
 
 ## Deployment (NUC, behind Caddy)
 
@@ -146,19 +173,22 @@ Everything the UI does is a plain HTTP call, so scripts can use it too.
 | `GET /api/items?v=&split=&mode=&cls=&clsmode=&offset=&limit=` | images with boxes and their review flag |
 | `GET /api/tree?path=` | one directory listing, with breadcrumbs |
 | `GET /api/review/meta` | statuses, whether the log is writable, proxy user |
-| `GET /api/review/summary?v=` | `{ok, no}` |
-| `GET /api/review/rejects?v=` | every image marked not OK, with comments |
+| `GET /api/review/summary?v=` | `{ok, no, review, total, unflagged}` |
+| `GET /api/review/rejects?v=` | every image held back from the export |
+| `GET /api/queue?v=&status=` | images needing work, across every split |
 | `GET /api/review/export?v=` | review log as CSV |
 | `GET /api/refresh` | drop the scan and flag caches |
 | `POST /api/flag` | `{v, split, image, status, reviewer}` |
-| `POST /api/comment` | `{v, split, image, text, reviewer}`; add `id` to reword that comment |
+| `POST /api/comment` | `{v, split, image, text, reviewer}` |
+| `POST /api/labels` | `{v, split, image, boxes}` — redraw; sets the status to `review` |
+| `POST /api/labels/revert` | `{v, split, image}` — drop the redraw, back to `no` |
 | `POST /api/comment/delete` | `{v, split, image, id, reviewer}` — author only |
 | `GET /img?v=&split=&n=&t=1` | full image, or a cached thumbnail |
 | `GET /file?path=` | one file |
-| `GET /download?path=&exclude=1` | streamed zip; `exclude=1` drops rejected images |
+| `GET /download?path=&exclude=1` | streamed zip; `exclude=1` applies the review |
 
-`mode` is `all｜unreviewed｜ok｜no｜commented｜unlabeled｜empty`. `cls` takes one
-class index or a comma list (`0,2,5`); `clsmode=any` (default) keeps images
+`mode` is `all｜unreviewed｜ok｜no｜review｜commented｜unlabeled｜empty`. `cls`
+takes one class index or a comma list (`0,2,5`); `clsmode=any` (default) keeps images
 holding at least one, `clsmode=all` only those holding every one. Each `POST`
 answers with the image's whole flag, verdict and full thread.
 
