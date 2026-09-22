@@ -139,24 +139,39 @@ and the server prints the same warning once to its log — `docker compose logs
 browser`. Work is never lost when this happens, only unattributed, and the
 orphaned entries can be cleaned up by anyone once identity is flowing again.
 
-Each host keeps its own `.env` (untracked — copy `.env.example`). `BIND_ADDR` is
-the VPN address Caddy binds to; leave it out and the app listens on loopback
-only, so a missing `.env` makes it unreachable rather than exposed on every
-interface.
+Two untracked files hold everything host-specific, so nothing here is ever
+committed and `git pull` can never overwrite a password:
+
+| File | Copy from | Holds |
+|---|---|---|
+| `.env` | `.env.example` | `BIND_ADDR`, the VPN address Caddy binds to |
+| `caddy.env` | `caddy.env.example` | one `REVIEWER_<n>=<username> <hash>` per reviewer |
+
+Leave `BIND_ADDR` out and the app listens on loopback only — a missing `.env`
+makes it unreachable rather than exposed on every interface.
 
 ```bash
-cp .env.example .env && ${EDITOR:-nano} .env    # once per host
+cp .env.example .env && cp caddy.env.example caddy.env    # once per host
+docker run --rm caddy:2 caddy hash-password --plaintext 'THE_PASSWORD'
+${EDITOR:-nano} .env caddy.env
 docker compose build --build-arg DVC_GID=$(getent group dvc | cut -d: -f3)
 docker compose up -d
 ```
 
-Mounts: `/srv/data/datasets` → `/data/datasets` **ro**, `/srv/data/review` →
-`/data/review` **rw**. Passwords are bcrypt hashes in the Caddyfile, one line per
-reviewer:
+Paste each hash exactly as printed, `$` signs and all. Changing a password or
+adding a reviewer means editing `caddy.env` and `docker compose up -d caddy` —
+the Caddyfile is not touched and no rebuild is needed.
 
-```bash
-docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
-```
+> `caddy.env` is passed with `format: raw` for a reason. A bcrypt hash is full
+> of `$`, and Compose's normal interpolation eats them: `$2a$14$Wh…` arrives as
+> `$2a$14` and every login fails with no obvious cause.
+
+The username is what lands in `X-Remote-User`, so it becomes the name on every
+verdict, comment and correction — and it is what the four-eyes rule compares.
+You need at least two reviewers for anyone to accept a fix.
+
+Mounts: `/srv/data/datasets` → `/data/datasets` **ro**, `/srv/data/review` →
+`/data/review` **rw**.
 
 > Never add `header_up -X-Remote-User` to the `reverse_proxy` block. Caddy
 > applies header ops add, then set, then delete, so the deletion runs *after*
