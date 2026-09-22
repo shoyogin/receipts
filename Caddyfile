@@ -5,9 +5,7 @@
 #     # …same handlers as below…
 # }
 #
-# Generate password hashes (bcrypt), one per user:
-#   docker run --rm caddy:2 caddy hash-password --plaintext 'YOUR_PASSWORD'
-# Paste each hash below in place of REPLACE_ME_<user>.
+# Reviewers are configured in caddy.env, not here. See caddy.env.example.
 
 :80 {
     log {
@@ -18,10 +16,17 @@
         max_size 2MB
     }
 
+    # Reviewers live in caddy.env, which is untracked — no name and no hash is
+    # ever committed, and pulling this file cannot overwrite anyone's password.
+    # Each slot holds one "<username> <bcrypt hash>" pair; empty ones are
+    # ignored, so unused slots cost nothing. Add more lines here for a sixth
+    # reviewer — that is a config change, not a secret.
     basic_auth {
-        # One line per reviewer: <username> <bcrypt hash from the command above>.
-        alice         REPLACE_ME_alice
-        bob           REPLACE_ME_bob
+        {$REVIEWER_1}
+        {$REVIEWER_2}
+        {$REVIEWER_3}
+        {$REVIEWER_4}
+        {$REVIEWER_5}
     }
 
     reverse_proxy browser:8800 {
