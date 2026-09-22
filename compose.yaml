@@ -34,6 +34,13 @@ services:
     # not a wildcard: with no .env the app is unreachable rather than exposed.
     ports:
       - "${BIND_ADDR:-127.0.0.1}:80:80"
+    # Reviewer names and password hashes, untracked and per-host. `format: raw`
+    # matters: a bcrypt hash is full of $ signs, and Compose's normal
+    # interpolation eats them — "$2a$14$Wh…" arrives as "$2a$14" and every
+    # login fails. Raw passes the line through untouched.
+    env_file:
+      - path: caddy.env
+        format: raw
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
